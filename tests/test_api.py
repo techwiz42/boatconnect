@@ -470,3 +470,91 @@ def test_wrong_feed_addresses_are_refused_and_then_throttled(app):
     assert client.get("/api/calendar/" + "y" * 43).status_code == 404                    # no .ics
     codes = [client.get(f"/api/calendar/{'z' * 42}{i % 10}.ics").status_code for i in range(40)]
     assert 429 in codes                                                                   # a guesser is stopped
+
+
+# ---- boat photos --------------------------------------------------------------------------------------------------------------------------------------------
+
+def picture(size=(400, 300), colour="navy", fmt="PNG"):
+    import io
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", size, colour).save(out, format=fmt)
+    return out.getvalue()
+
+
+def test_an_owner_sets_the_photo_and_anyone_can_see_it_on_an_approved_boat(app, approved_boat):
+    from fastapi.testclient import TestClient
+    boat_id, skipper = approved_boat
+    assert skipper.get("/api/boats").json()[0]["photo"] is None
+    reply = skipper.put(f"/api/boats/{boat_id}/photo", content=picture(), headers={"Content-Type": "image/png"})
+    assert reply.status_code == 200 and reply.json()["version"] > 0
+    public = TestClient(app)                                                              # not logged in
+    listed = public.get("/api/boats").json()[0]
+    assert listed["photo"] == {"version": reply.json()["version"]}
+    image = public.get(f"/api/boats/{boat_id}/photo?v={listed['photo']['version']}")
+    assert image.status_code == 200 and image.headers["content-type"] == "image/jpeg" and image.content[:2] == b"\xff\xd8"
+    assert "public" in image.headers["cache-control"] and image.headers["etag"]
+    assert public.get(f"/api/boats/{boat_id}/photo", headers={"If-None-Match": image.headers["etag"]}).status_code == 304
+
+
+def test_what_is_stored_is_the_reencoded_small_jpeg(approved_boat):
+    import io
+    from PIL import Image
+    boat_id, skipper = approved_boat
+    big = picture((1600, 1200), "teal", fmt="JPEG")
+    assert skipper.put(f"/api/boats/{boat_id}/photo", content=big).status_code == 200
+    served = Image.open(io.BytesIO(skipper.get(f"/api/boats/{boat_id}/photo").content))
+    assert served.format == "JPEG" and served.size == (1200, 900)
+
+
+def test_only_an_owner_may_change_the_photo(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    cass = join_as_crew(boat_id, skipper, make_person)
+    for who in (cass, admin, make_person("stranger@example.com", "Stranger")):
+        assert who.put(f"/api/boats/{boat_id}/photo", content=picture()).status_code == 403
+        assert who.delete(f"/api/boats/{boat_id}/photo").status_code == 403
+    from fastapi.testclient import TestClient
+    assert TestClient(skipper.client.app).put(f"/api/boats/{boat_id}/photo", content=picture()).status_code == 401
+    assert skipper.get(f"/api/boats/{boat_id}").json()["photo"] is None
+
+
+def test_the_photo_can_be_replaced_and_removed(app, approved_boat):
+    from fastapi.testclient import TestClient
+    boat_id, skipper = approved_boat
+    first = skipper.put(f"/api/boats/{boat_id}/photo", content=picture(colour="red")).json()["version"]
+    import time
+    time.sleep(1.05)                                                                      # versions are whole seconds
+    second = skipper.put(f"/api/boats/{boat_id}/photo", content=picture(colour="green")).json()["version"]
+    assert second > first
+    assert skipper.delete(f"/api/boats/{boat_id}/photo").status_code == 200
+    assert skipper.get(f"/api/boats/{boat_id}").json()["photo"] is None
+    assert TestClient(app).get(f"/api/boats/{boat_id}/photo").status_code == 404
+
+
+def test_a_bad_upload_is_refused_with_a_message(approved_boat):
+    boat_id, skipper = approved_boat
+    refused = skipper.put(f"/api/boats/{boat_id}/photo", content=b"<script>alert(1)</script>", headers={"Content-Type": "image/jpeg"})
+    assert refused.status_code == 422 and "not a JPEG, PNG or WebP" in refused.json()["detail"]
+    assert skipper.put(f"/api/boats/{boat_id}/photo", content=b"").status_code == 422
+    assert skipper.get(f"/api/boats/{boat_id}").json()["photo"] is None
+
+
+def test_an_oversized_upload_is_refused(approved_boat):
+    boat_id, skipper = approved_boat
+    reply = skipper.put(f"/api/boats/{boat_id}/photo", content=b"\x00" * 1_000_000)
+    assert reply.status_code == 413
+
+
+def test_a_photo_of_a_boat_awaiting_approval_is_not_public(app, make_person):
+    from fastapi.testclient import TestClient
+    sam = make_person("sam@example.com", "Sam")
+    boat_id = sam.post("/api/boats", json=BOAT).json()["id"]
+    assert sam.put(f"/api/boats/{boat_id}/photo", content=picture()).status_code == 200            # the owner may prepare it
+    assert sam.get(f"/api/boats/{boat_id}/photo").status_code == 200
+    assert TestClient(app).get(f"/api/boats/{boat_id}/photo").status_code == 404
+    assert make_person("other@example.com", "Other").get(f"/api/boats/{boat_id}/photo").status_code == 404
+
+
+def test_a_photo_upload_from_another_site_is_refused(approved_boat):
+    boat_id, skipper = approved_boat
+    assert skipper.put(f"/api/boats/{boat_id}/photo", content=picture(), headers={"Origin": "https://evil.example"}).status_code == 403

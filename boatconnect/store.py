@@ -16,7 +16,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 NAME_CHARS = 60
 BOAT_NAME_CHARS = 80
@@ -58,6 +58,8 @@ CREATE TABLE share_history (
 CREATE INDEX share_history_boat ON share_history(boat_id, id);
 CREATE TABLE calendar_feeds (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, token TEXT NOT NULL UNIQUE, created_at REAL NOT NULL);
+CREATE TABLE boat_photos (
+  boat_id TEXT PRIMARY KEY REFERENCES boats(id) ON DELETE CASCADE, data BLOB NOT NULL, updated_at REAL NOT NULL);
 """
 
 # Version 2 keeps a history of owners' shares (who joined with what, who changed theirs, who left). The owners that exist when it is made start with the share they joined with.
@@ -75,6 +77,12 @@ CREATE TABLE calendar_feeds (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, token TEXT NOT NULL UNIQUE, created_at REAL NOT NULL);
 ALTER TABLE bookings ADD COLUMN updated_at REAL NOT NULL DEFAULT 0;
 UPDATE bookings SET updated_at = created_at;
+"""
+
+# Version 4 adds a photo for each boat, kept in the database so the nightly backup holds it.
+MIGRATE_3_TO_4 = """
+CREATE TABLE boat_photos (
+  boat_id TEXT PRIMARY KEY REFERENCES boats(id) ON DELETE CASCADE, data BLOB NOT NULL, updated_at REAL NOT NULL);
 """
 
 
@@ -95,10 +103,12 @@ class Store:
             if version == 0:
                 db.executescript(SCHEMA)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version in (1, 2):
+            elif version in (1, 2, 3):
                 if version == 1:
                     db.executescript(MIGRATE_1_TO_2)
-                db.executescript(MIGRATE_2_TO_3)
+                if version in (1, 2):
+                    db.executescript(MIGRATE_2_TO_3)
+                db.executescript(MIGRATE_3_TO_4)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StoreError(f"the database has schema version {version}; this program expects {SCHEMA_VERSION}")
@@ -177,6 +187,23 @@ class Store:
             changed = db.execute("UPDATE boats SET name = ?, home_port = ?, description = ?, timezone = ? WHERE id = ?", (name, home_port, description, timezone, boat_id)).rowcount
         if not changed:
             raise StoreError("no such boat")
+
+    def set_photo(self, boat_id: str, data: bytes) -> None:
+        """Keep a boat's photo (already checked and re-encoded by photos.process_photo); a new one replaces the old."""
+        with self._connect() as db:
+            if not db.execute("SELECT 1 FROM boats WHERE id = ?", (boat_id,)).fetchone():
+                raise StoreError("no such boat")
+            db.execute("INSERT INTO boat_photos (boat_id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(boat_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+                       (boat_id, data, time.time()))
+
+    def get_photo(self, boat_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute("SELECT data, updated_at FROM boat_photos WHERE boat_id = ?", (boat_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_photo(self, boat_id: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM boat_photos WHERE boat_id = ?", (boat_id,))
 
     def get_boat(self, boat_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
@@ -437,7 +464,8 @@ class Store:
 _BOAT_SELECT = """SELECT b.id, b.name, b.home_port, b.description, b.timezone, b.status, b.created_by, b.created_at,
   (SELECT COUNT(*) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'owner') AS owner_count,
   (SELECT COUNT(*) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'crew') AS crew_count,
-  (SELECT COALESCE(SUM(share_percent), 0) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'owner') AS owner_share_total
+  (SELECT COALESCE(SUM(share_percent), 0) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'owner') AS owner_share_total,
+  (SELECT updated_at FROM boat_photos p WHERE p.boat_id = b.id) AS photo_updated
   FROM boats b"""
 
 _REQUEST_SELECT = """SELECT r.id, r.boat_id, b.name AS boat_name, r.user_id, u.name AS user_name, r.role, r.share_percent, r.message, r.status, r.created_at

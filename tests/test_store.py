@@ -240,6 +240,7 @@ def test_a_database_from_before_the_share_history_is_upgraded(tmp_path):
     with sqlite3.connect(path) as db:                                                         # turn it back into a version-1 database
         db.execute("DROP TABLE share_history")
         db.execute("DROP TABLE calendar_feeds")
+        db.execute("DROP TABLE boat_photos")
         db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
         db.execute("PRAGMA user_version = 1")
     upgraded = Store(path)
@@ -318,9 +319,52 @@ def test_a_database_from_before_the_calendar_feed_is_upgraded(tmp_path):
     created = first.get_booking(trip)["created_at"]
     with sqlite3.connect(path) as db:                                                     # turn it back into a version-2 database
         db.execute("DROP TABLE calendar_feeds")
+        db.execute("DROP TABLE boat_photos")
         db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
         db.execute("PRAGMA user_version = 2")
     upgraded = Store(path)
     assert upgraded.get_booking(trip)["updated_at"] == created                            # an existing trip's last change starts as its creation
     token = upgraded.feed_token(owner)
     assert upgraded.user_for_feed(token)["id"] == owner
+
+
+# ---- boat photos ------------------------------------------------------------------------------------------------------------------------------------------
+
+def test_a_boats_photo_is_kept_replaced_and_removed(store):
+    owner = user(store, 1)
+    b = boat(store, owner)
+    assert store.get_photo(b) is None and store.get_boat(b)["photo_updated"] is None
+    store.set_photo(b, b"first")
+    first = store.get_photo(b)
+    assert first["data"] == b"first" and store.get_boat(b)["photo_updated"] == first["updated_at"]
+    store.set_photo(b, b"second")
+    assert store.get_photo(b)["data"] == b"second"
+    store.delete_photo(b)
+    assert store.get_photo(b) is None
+    with pytest.raises(StoreError, match="no such boat"):
+        store.set_photo("missing", b"x")
+
+
+def test_the_boat_list_says_which_boats_have_a_photo(store):
+    owner = user(store, 1)
+    with_photo, without = boat(store, owner), boat(store, owner)
+    for b in (with_photo, without):
+        store.decide_boat(b, True)
+    store.set_photo(with_photo, b"x")
+    listed = {b["id"]: b["photo_updated"] for b in store.approved_boats()}
+    assert listed[with_photo] is not None and listed[without] is None
+
+
+def test_a_database_from_before_boat_photos_is_upgraded(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "v3.db")
+    first = Store(path)
+    owner = user(first, 1)
+    b = boat(first, owner)
+    with sqlite3.connect(path) as db:                                                     # turn it back into a version-3 database
+        db.execute("DROP TABLE boat_photos")
+        db.execute("PRAGMA user_version = 3")
+    upgraded = Store(path)
+    assert upgraded.get_boat(b)["photo_updated"] is None
+    upgraded.set_photo(b, b"x")
+    assert upgraded.get_photo(b)["data"] == b"x"

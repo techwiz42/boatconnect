@@ -30,6 +30,10 @@ export interface ShareChange {
   created_at: number;
 }
 
+export interface BoatPhoto {
+  version: number; // changes whenever the photo does, so a browser fetches the new one
+}
+
 export interface Boat {
   id: string;
   name: string;
@@ -39,6 +43,7 @@ export interface Boat {
   status: "pending" | "approved" | "rejected";
   owner_count: number;
   crew_count: number;
+  photo: BoatPhoto | null;
   unallocated_percent: number; // the part of the boat no owner holds yet: room for a new owner
   my_role: Role | null;
   my_request: MyRequest | null;
@@ -120,14 +125,14 @@ export function messageOf(body: unknown, status: number): string {
   return status >= 500 ? "something went wrong on our side; please try again" : "that request was refused";
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, raw?: Blob): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
       method,
       credentials: "same-origin",
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: raw ? { "Content-Type": raw.type || "application/octet-stream" } : body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: raw ?? (body === undefined ? undefined : JSON.stringify(body)),
     });
   } catch {
     throw new ApiError(0, "could not reach the server; check your connection");
@@ -157,6 +162,8 @@ export const api = {
   setShare: (boatId: string, sharePercent: number) => call<{ ok: boolean }>("PATCH", `/api/boats/${boatId}/my-share`, { share_percent: sharePercent }),
   calendarFeed: () => call<{ path: string }>("GET", "/api/calendar-feed"),
   resetCalendarFeed: () => call<{ path: string }>("POST", "/api/calendar-feed/reset"),
+  uploadPhoto: (boatId: string, picture: Blob) => call<BoatPhoto>("PUT", `/api/boats/${boatId}/photo`, undefined, picture),
+  deletePhoto: (boatId: string) => call<{ ok: boolean }>("DELETE", `/api/boats/${boatId}/photo`),
   removeMember: (boatId: string, userId: string) => call<{ ok: boolean }>("DELETE", `/api/boats/${boatId}/members/${userId}`),
   inbox: () => call<Inbox>("GET", "/api/inbox"),
   decideBoat: (boatId: string, approve: boolean) => call<{ ok: boolean }>("POST", `/api/boats/${boatId}/decision`, { approve }),
@@ -168,3 +175,6 @@ export const api = {
   signOn: (tripId: string) => call<{ ok: boolean }>("POST", `/api/bookings/${tripId}/signon`),
   signOff: (tripId: string, userId: string) => call<{ ok: boolean }>("DELETE", `/api/bookings/${tripId}/signon/${userId}`),
 };
+
+/** Where a boat's photo is. The version is in the address so a changed photo is fetched afresh while an unchanged one is kept by the browser. */
+export const photoUrl = (boatId: string, photo: BoatPhoto): string => `/api/boats/${boatId}/photo?v=${photo.version}`;

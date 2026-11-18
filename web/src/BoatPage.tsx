@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { api, ApiError, Boat, Role } from "./api";
+import { api, ApiError, Boat, photoUrl, Role } from "./api";
 import { useAuth } from "./auth";
 import { Calendar } from "./Calendar";
 import { EditBoat } from "./EditBoat";
@@ -115,12 +115,15 @@ export function BoatPage() {
   return (
     <>
       <section className="card boat-head">
-        <div>
-          <h1>{boat.name}</h1>
-          <p className="hint">
-            {boat.home_port} · {boat.timezone.replace(/_/g, " ")} · {boat.owner_count} owner{boat.owner_count === 1 ? "" : "s"}, {boat.crew_count} crew
-          </p>
-          {boat.description && <p>{boat.description}</p>}
+        <div className="boat-id">
+          {boat.photo && <img src={photoUrl(boat.id, boat.photo)} alt={`Photo of ${boat.name}`} className="boat-photo" />}
+          <div>
+            <h1>{boat.name}</h1>
+            <p className="hint">
+              {boat.home_port} · {boat.timezone.replace(/_/g, " ")} · {boat.owner_count} owner{boat.owner_count === 1 ? "" : "s"}, {boat.crew_count} crew
+            </p>
+            {boat.description && <p>{boat.description}</p>}
+          </div>
         </div>
         <div className="head-actions">
           {s && <span className={`badge ${s.tone}`}>{s.text}</span>}
@@ -135,6 +138,7 @@ export function BoatPage() {
         <EditBoat
           boat={boat}
           onClose={() => setEditing(false)}
+          onPhotoChanged={load}
           onSaved={() => {
             setEditing(false);
             load();

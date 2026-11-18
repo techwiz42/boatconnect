@@ -43,6 +43,9 @@ class Person:
     def patch(self, *a, **k):
         return self.client.patch(*a, **k)
 
+    def put(self, *a, **k):
+        return self.client.put(*a, **k)
+
     def delete(self, *a, **k):
         return self.client.delete(*a, **k)
 

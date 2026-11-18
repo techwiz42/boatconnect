@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import auth, ical
+from . import auth, ical, photos
 from .config import Settings
 from .store import BOAT_NAME_CHARS, NAME_CHARS, TEXT_CHARS, Store, StoreError
 
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 COOKIE = "boatconnect_session"
 MAX_BODY_BYTES = 100_000
+MAX_PHOTO_BYTES = 900_000                        # the browser scales a photo down before sending it; the web server in front allows 1 MB
 MAX_CALENDAR_SPAN_SECONDS = 100 * 24 * 3600
 
 SECURITY_HEADERS = {
@@ -144,6 +145,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     boats_added = auth.Throttle(limit=5, window_seconds=24 * 3600)          # per user
     requests_made = auth.Throttle(limit=20, window_seconds=24 * 3600)       # per user
     bookings_made = auth.Throttle(limit=60, window_seconds=24 * 3600)       # per user
+    photos_sent = auth.Throttle(limit=30, window_seconds=24 * 3600)         # per user
     feed_misses = auth.Throttle(limit=30, window_seconds=15 * 60)           # wrong feed addresses, per address
 
     @asynccontextmanager
@@ -163,7 +165,8 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     @app.middleware("http")
     async def protect(request: Request, call_next):
         declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        allowed = MAX_PHOTO_BYTES if request.method == "PUT" and request.url.path.endswith("/photo") else MAX_BODY_BYTES
+        if declared and declared.isdigit() and int(declared) > allowed:
             response: Response = Response(status_code=413, content='{"detail":"request too large"}', media_type="application/json")
         else:
             response = await call_next(request)
@@ -276,6 +279,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         request = (waiting or {}).get(boat["id"])
         return {"id": boat["id"], "name": boat["name"], "home_port": boat["home_port"], "description": boat["description"], "timezone": boat["timezone"],
                 "status": boat["status"], "owner_count": boat["owner_count"], "crew_count": boat["crew_count"],
+                "photo": {"version": int(boat["photo_updated"])} if boat["photo_updated"] else None,        # the picture is at /api/boats/{id}/photo?v=<version>
                 "unallocated_percent": max(0.0, round(100.0 - boat["owner_share_total"], 6)),           # how much of the boat no owner holds yet: room for a new owner
                 "my_role": (roles or {}).get(boat["id"]),
                 "my_request": {"id": request["id"], "role": request["role"], "share_percent": request["share_percent"]} if request else None}
@@ -332,6 +336,50 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         await visible_boat(boat_id, user)
         await db(app.state.store.set_share, boat_id, user["id"], body.share_percent)
         return {"ok": True}
+
+    async def owner_of(boat_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+        boat = await visible_boat(boat_id, user)
+        if await app.state.store.run(app.state.store.role_of, boat_id, user["id"]) != "owner":
+            raise HTTPException(status_code=403, detail="only an owner may change the boat's photo")
+        return boat
+
+    @app.put("/api/boats/{boat_id}/photo", dependencies=[Depends(same_origin)])
+    async def put_photo(boat_id: str, request: Request, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+        """An owner sets the boat's photo: the request body is the image file. It is checked and re-encoded as a small JPEG before it is kept."""
+        await owner_of(boat_id, user)
+        limit(photos_sent, user["id"], "photo uploads")
+        body = bytearray()
+        async for chunk in request.stream():                                      # read with a ceiling, whatever the request claims about its size
+            body += chunk
+            if len(body) > MAX_PHOTO_BYTES:
+                raise HTTPException(status_code=413, detail="that photo is too large; choose a smaller one")
+        try:
+            data = await asyncio.to_thread(photos.process_photo, bytes(body))
+        except photos.PhotoError as error:
+            raise HTTPException(status_code=422, detail=str(error))
+        await db(app.state.store.set_photo, boat_id, data)
+        photos_sent.add(user["id"])
+        stored = await app.state.store.run(app.state.store.get_photo, boat_id)
+        return {"version": int(stored["updated_at"])}
+
+    @app.delete("/api/boats/{boat_id}/photo", dependencies=[Depends(same_origin)])
+    async def delete_photo(boat_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        await owner_of(boat_id, user)
+        await app.state.store.run(app.state.store.delete_photo, boat_id)
+        return {"ok": True}
+
+    @app.get("/api/boats/{boat_id}/photo")
+    async def get_photo(boat_id: str, request: Request, user: Optional[Dict[str, Any]] = Depends(optional_user)) -> Response:
+        """The photo of an approved boat is public (the boat list shows it); a boat that is not approved shows its photo only to its members and the administrator."""
+        await visible_boat(boat_id, user)
+        photo = await app.state.store.run(app.state.store.get_photo, boat_id)
+        if photo is None:
+            raise HTTPException(status_code=404, detail="no photo")
+        etag = f'"{int(photo["updated_at"])}-{len(photo["data"])}"'
+        headers = {"ETag": etag, "Cache-Control": "public, max-age=3600"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=photo["data"], media_type="image/jpeg", headers=headers)
 
     @app.post("/api/boats/{boat_id}/join-requests", status_code=201, dependencies=[Depends(same_origin)])
     async def join(boat_id: str, body: JoinIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:

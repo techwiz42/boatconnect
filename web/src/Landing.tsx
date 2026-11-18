@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, Boat } from "./api";
+import { api, Boat, photoUrl } from "./api";
 import { useAuth } from "./auth";
 
 export function standing(b: Boat): { text: string; tone: string } | null {
@@ -73,6 +73,7 @@ export function Landing() {
             return (
               <li key={b.id}>
                 <Link to={`/boats/${b.id}`} className="boat-card">
+                  {b.photo && <img src={photoUrl(b.id, b.photo)} alt={`Photo of ${b.name}`} className="card-photo" loading="lazy" />}
                   <span className="boat-name">{b.name}</span>
                   <span className="hint">
                     {b.home_port} · {b.owner_count} owner{b.owner_count === 1 ? "" : "s"}, {b.crew_count} crew
