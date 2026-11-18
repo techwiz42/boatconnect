@@ -1,6 +1,6 @@
 import pytest
 
-from boatconnect.store import StoreError
+from boatconnect.store import Store, StoreError
 
 from .conftest import DAY, HOUR, T0
 
@@ -147,3 +147,100 @@ def test_the_last_owner_cannot_leave_and_leaving_takes_ones_bookings_along(store
     with pytest.raises(StoreError, match="at least one owner"):
         store.remove_member(b, owner)
     store.remove_member(b, crew)
+
+
+def test_a_boats_details_can_be_changed(store):
+    owner = user(store, 1)
+    b = boat(store, owner)
+    store.update_boat(b, "Scooter II", "Newport", "Re-rigged", "America/Los_Angeles")
+    got = store.get_boat(b)
+    assert (got["name"], got["home_port"], got["description"], got["timezone"], got["status"]) == ("Scooter II", "Newport", "Re-rigged", "America/Los_Angeles", "pending")
+    with pytest.raises(StoreError, match="no such boat"):
+        store.update_boat("missing", "x", "y", "", "UTC")
+
+
+def test_changing_the_time_zone_keeps_the_moment_of_a_booking(store):
+    owner = user(store, 1)
+    b = boat(store, owner)
+    trip = store.create_booking(b, owner, "Trip", T0, T0 + HOUR, None, "")
+    store.update_boat(b, "Scooter", "Marina", "", "Pacific/Auckland")
+    assert store.get_booking(trip)["start_utc"] == T0
+
+
+# ---- owners' shares over time ----------------------------------------------------------------------------------------------------------------------------
+
+def owners_boat(store, share=100):
+    first = user(store, 1)
+    b = boat(store, first, share)
+    store.decide_boat(b, True)
+    return b, first
+
+
+def test_an_owner_lowers_their_share_and_that_makes_room_for_a_new_owner(store):
+    b, first = owners_boat(store)                                                            # the first owner holds all of it
+    newcomer = user(store, 2)
+    request = store.request_join(b, newcomer, "owner", 25, "")
+    with pytest.raises(StoreError, match="must lower their own share first"):
+        store.decide_request(request, first, True)
+    store.set_share(b, first, 75)
+    store.decide_request(request, first, True)
+    assert {m["name"]: m["share_percent"] for m in store.members(b)} == {"User 1": 75, "User 2": 25}
+
+
+def test_an_owner_may_raise_their_share_only_into_room_nobody_holds(store):
+    b, first = owners_boat(store, 40)
+    second = user(store, 2)
+    store.decide_request(store.request_join(b, second, "owner", 30, ""), first, True)        # 40 + 30: 30% unallocated
+    store.set_share(b, first, 70)                                                            # takes all of it
+    with pytest.raises(StoreError, match="at most 30% is available"):                        # the other owner holds 70, so 30 is the most that is left for them
+        store.set_share(b, second, 31)
+    with pytest.raises(StoreError, match="at most 70% is available"):
+        store.set_share(b, first, 71)
+    store.set_share(b, first, 60)
+    store.set_share(b, second, 40)                                                           # 60 + 40 = 100
+
+
+@pytest.mark.parametrize("share", [0, -1, 100.5])
+def test_a_share_must_be_between_0_and_100(store, share):
+    b, first = owners_boat(store, 50)
+    with pytest.raises(StoreError, match="share"):
+        store.set_share(b, first, share)
+
+
+def test_a_share_that_is_unchanged_or_not_an_owners_is_refused(store):
+    b, first = owners_boat(store, 50)
+    crew = user(store, 2)
+    store.decide_request(store.request_join(b, crew, "crew", None, ""), first, True)
+    with pytest.raises(StoreError, match="already 50%"):
+        store.set_share(b, first, 50)
+    with pytest.raises(StoreError, match="only an owner"):
+        store.set_share(b, crew, 10)
+    with pytest.raises(StoreError, match="only an owner"):
+        store.set_share(b, user(store, 3), 10)
+
+
+def test_the_share_history_records_joining_changing_and_leaving(store):
+    b, first = owners_boat(store, 60)
+    second = user(store, 2)
+    store.decide_request(store.request_join(b, second, "owner", 40, ""), first, True)
+    store.set_share(b, first, 50)
+    store.remove_member(b, second)
+    crew = user(store, 3)
+    store.decide_request(store.request_join(b, crew, "crew", None, ""), first, True)             # crew hold no share: nothing to record
+    history = [(h["name"], h["old_share"], h["new_share"]) for h in reversed(store.share_history(b))]
+    assert history == [("User 1", None, 60), ("User 2", None, 40), ("User 1", 60, 50), ("User 2", 40, None)]
+
+
+def test_a_database_from_before_the_share_history_is_upgraded(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    first = Store(path)
+    owner = user(first, 1)
+    b = boat(first, owner, 70)
+    with sqlite3.connect(path) as db:                                                         # turn it back into a version-1 database
+        db.execute("DROP TABLE share_history")
+        db.execute("PRAGMA user_version = 1")
+    upgraded = Store(path)
+    assert [(h["name"], h["old_share"], h["new_share"]) for h in upgraded.share_history(b)] == [("User 1", None, 70)]
+    upgraded.set_share(b, owner, 65)                                                          # and it works as a new one
+    assert len(upgraded.share_history(b)) == 2

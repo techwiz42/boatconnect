@@ -86,12 +86,11 @@ def _zone(value: str) -> str:
     return value
 
 
-class BoatIn(BaseModel):
+class BoatEdit(BaseModel):
     name: str = Field(min_length=1, max_length=BOAT_NAME_CHARS)
     home_port: str = Field(min_length=1, max_length=BOAT_NAME_CHARS)
     description: str = Field(default="", max_length=TEXT_CHARS)
     timezone: str = Field(max_length=64)
-    share_percent: float = Field(gt=0, le=100)
 
     _tz = field_validator("timezone")(lambda cls, v: _zone(v))
 
@@ -102,6 +101,14 @@ class BoatIn(BaseModel):
         if not value:
             raise ValueError("this cannot be blank")
         return value
+
+
+class BoatIn(BoatEdit):
+    share_percent: float = Field(gt=0, le=100)
+
+
+class ShareIn(BaseModel):
+    share_percent: float = Field(gt=0, le=100)
 
 
 class JoinIn(BaseModel):
@@ -268,6 +275,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         request = (waiting or {}).get(boat["id"])
         return {"id": boat["id"], "name": boat["name"], "home_port": boat["home_port"], "description": boat["description"], "timezone": boat["timezone"],
                 "status": boat["status"], "owner_count": boat["owner_count"], "crew_count": boat["crew_count"],
+                "unallocated_percent": max(0.0, round(100.0 - boat["owner_share_total"], 6)),           # how much of the boat no owner holds yet: room for a new owner
                 "my_role": (roles or {}).get(boat["id"]),
                 "my_request": {"id": request["id"], "role": request["role"], "share_percent": request["share_percent"]} if request else None}
 
@@ -305,7 +313,24 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         out = await describe(boat, user)
         if out["my_role"] or is_admin(user):
             out["members"] = await app.state.store.run(app.state.store.members, boat_id)         # who belongs, and the owners' shares, is for members only
+            out["share_history"] = await app.state.store.run(app.state.store.share_history, boat_id)
         return out
+
+    @app.patch("/api/boats/{boat_id}", dependencies=[Depends(same_origin)])
+    async def edit_boat(boat_id: str, body: BoatEdit, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        """Only an owner changes the boat's details (even before it is approved). Crew, strangers and the administrator may not."""
+        await visible_boat(boat_id, user)
+        if await app.state.store.run(app.state.store.role_of, boat_id, user["id"]) != "owner":
+            raise HTTPException(status_code=403, detail="only an owner may change the boat's details")
+        await db(app.state.store.update_boat, boat_id, body.name, body.home_port, body.description, body.timezone)
+        return {"ok": True}
+
+    @app.patch("/api/boats/{boat_id}/my-share", dependencies=[Depends(same_origin)])
+    async def change_my_share(boat_id: str, body: ShareIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        """An owner changes their own share: lowering it makes room for another owner (who is then approved as usual); raising it only takes room nobody holds."""
+        await visible_boat(boat_id, user)
+        await db(app.state.store.set_share, boat_id, user["id"], body.share_percent)
+        return {"ok": True}
 
     @app.post("/api/boats/{boat_id}/join-requests", status_code=201, dependencies=[Depends(same_origin)])
     async def join(boat_id: str, body: JoinIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:

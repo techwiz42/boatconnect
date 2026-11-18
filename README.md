@@ -5,6 +5,9 @@ a month calendar like Google Calendar's.
 
 - **Boats** are public to browse. A new boat waits for the site administrator's approval.
 - **Joining**: anyone registered can ask. The administrator approves **owners** (who hold a share of the boat, which can be a fraction); a boat's owners approve its **crew**.
+- **Shares over time**: owners' shares may add up to at most 100%. An owner can lower their own share (or raise it into room nobody holds); that makes room for a new owner,
+  who is then approved as usual. Every change is kept in the boat's share history, which its members can read.
+- **Editing**: only an owner can change a boat's name, port, description and time zone.
 - **Trips**: an owner books the boat with a start and an end time. Crew and other owners **sign on** to a trip, and any number can be aboard. Two trips of one boat may not
   overlap. A trip may have a limit on how many can come.
 - The calendar is shown in the boat's own time zone; the server stores UTC.

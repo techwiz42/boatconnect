@@ -430,6 +430,13 @@ input[type="checkbox"] {
   align-items: flex-start;
 }
 
+.head-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
 .boat-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 17rem;
@@ -445,8 +452,10 @@ input[type="checkbox"] {
 
 .member-list li {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 0.5rem;
+  align-items: baseline;
+  gap: 0.15rem 0.5rem;
   padding: 0.35rem 0;
   border-bottom: 1px solid var(--line);
 }
@@ -757,4 +766,37 @@ input[type="checkbox"] {
   .card {
     padding: 0.8rem;
   }
+}
+
+.member-list li > span:first-child {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+
+.member-actions {
+  display: flex;
+  gap: 0.6rem;
+  white-space: nowrap;
+}
+
+.history {
+  margin-top: 0.75rem;
+  font-size: 0.92rem;
+}
+
+.history summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.history ul {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+
+.history li {
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--line);
 }

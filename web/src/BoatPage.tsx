@@ -3,7 +3,15 @@ import { Link, useLocation, useParams } from "react-router-dom";
 import { api, ApiError, Boat, Role } from "./api";
 import { useAuth } from "./auth";
 import { Calendar } from "./Calendar";
+import { EditBoat } from "./EditBoat";
+import { ShareDialog } from "./ShareDialog";
 import { standing } from "./Landing";
+
+const pct = (n: number) => `${Math.round(n * 1e6) / 1e6}%`;
+
+function when(epochSeconds: number): string {
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(epochSeconds * 1000));
+}
 
 function JoinForm({ boat, onSent }: { boat: Boat; onSent: () => void }) {
   const [role, setRole] = useState<Role>("crew");
@@ -39,7 +47,12 @@ function JoinForm({ boat, onSent }: { boat: Boat; onSent: () => void }) {
       {role === "owner" && (
         <label>
           Your share of the boat, in percent
-          <input type="number" min={1} max={100} step="any" value={share} onChange={(e) => setShare(e.target.value)} required />
+          <input type="number" min={0.01} max={100} step="any" value={share} onChange={(e) => setShare(e.target.value)} required />
+          <span className="hint">
+            {boat.unallocated_percent > 0
+              ? `${pct(boat.unallocated_percent)} of the boat is not held by any owner yet.`
+              : "The owners hold all of the boat. An existing owner has to lower their own share before you can be approved."}
+          </span>
         </label>
       )}
       <label>
@@ -65,6 +78,8 @@ export function BoatPage() {
   const [boat, setBoat] = useState<Boat | null>(null);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   const load = useCallback(() => {
     api.boat(id).then(
@@ -95,6 +110,7 @@ export function BoatPage() {
   const s = standing(boat);
   const member = boat.my_role !== null;
   const approved = boat.status === "approved";
+  const canEdit = boat.my_role === "owner";
 
   return (
     <>
@@ -106,13 +122,43 @@ export function BoatPage() {
           </p>
           {boat.description && <p>{boat.description}</p>}
         </div>
-        {s && <span className={`badge ${s.tone}`}>{s.text}</span>}
+        <div className="head-actions">
+          {s && <span className={`badge ${s.tone}`}>{s.text}</span>}
+          {canEdit && (
+            <button type="button" className="button secondary" onClick={() => setEditing(true)}>
+              Edit boat
+            </button>
+          )}
+        </div>
       </section>
+      {editing && (
+        <EditBoat
+          boat={boat}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            load();
+          }}
+        />
+      )}
 
       {!approved && (
         <section className="card">
           <p>This boat is waiting for the administrator's approval. It will appear in the list, and people can ask to join, once it is approved.</p>
         </section>
+      )}
+
+      {sharing && boat.my_role === "owner" && (
+        <ShareDialog
+          boatId={boat.id}
+          current={boat.members?.find((m) => m.user_id === me?.id)?.share_percent ?? 0}
+          unallocated={boat.unallocated_percent}
+          onClose={() => setSharing(false)}
+          onSaved={() => {
+            setSharing(false);
+            load();
+          }}
+        />
       )}
 
       {approved && member && me && (
@@ -132,9 +178,16 @@ export function BoatPage() {
                       </span>
                     </span>
                     {m.user_id === me.id ? (
-                      <button type="button" className="link-button" onClick={() => remove(m.user_id, "Leave this boat? Your trips and sign-ons are removed.")}>
-                        Leave
-                      </button>
+                      <span className="member-actions">
+                        {m.role === "owner" && (
+                          <button type="button" className="link-button" onClick={() => setSharing(true)}>
+                            Change share
+                          </button>
+                        )}
+                        <button type="button" className="link-button" onClick={() => remove(m.user_id, "Leave this boat? Your trips and sign-ons are removed.")}>
+                          Leave
+                        </button>
+                      </span>
                     ) : (
                       boat.my_role === "owner" && (
                         <button type="button" className="link-button" onClick={() => remove(m.user_id, `Remove ${m.name} from the boat? Their trips and sign-ons are removed.`)}>
@@ -146,12 +199,27 @@ export function BoatPage() {
                 ))}
               </ul>
             ) : null}
+            {boat.unallocated_percent > 0 && <p className="hint">{pct(boat.unallocated_percent)} of the boat is not held by any owner.</p>}
             {actionError && (
               <p className="error" role="alert">
                 {actionError}
               </p>
             )}
             <p className="hint">Owners book the boat. Anyone aboard can sign on to a trip.</p>
+            {boat.share_history && boat.share_history.length > 0 && (
+              <details className="history">
+                <summary>Share history</summary>
+                <ul>
+                  {boat.share_history.map((h, i) => (
+                    <li key={i}>
+                      <strong>{h.name}</strong>{" "}
+                      {h.old_share === null ? `joined as an owner with ${pct(h.new_share ?? 0)}` : h.new_share === null ? `left, having held ${pct(h.old_share)}` : `${pct(h.old_share)} → ${pct(h.new_share)}`}
+                      <span className="hint"> · {when(h.created_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </aside>
         </div>
       )}

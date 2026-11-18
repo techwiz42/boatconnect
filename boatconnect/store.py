@@ -15,7 +15,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 NAME_CHARS = 60
 BOAT_NAME_CHARS = 80
@@ -50,6 +50,19 @@ CREATE INDEX bookings_boat_time ON bookings(boat_id, start_utc);
 CREATE TABLE signons (
   booking_id TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL,
   PRIMARY KEY (booking_id, user_id));
+CREATE TABLE share_history (
+  id INTEGER PRIMARY KEY, boat_id TEXT NOT NULL REFERENCES boats(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  old_share REAL, new_share REAL, created_at REAL NOT NULL);
+CREATE INDEX share_history_boat ON share_history(boat_id, id);
+"""
+
+# Version 2 keeps a history of owners' shares (who joined with what, who changed theirs, who left). The owners that exist when it is made start with the share they joined with.
+MIGRATE_1_TO_2 = """
+CREATE TABLE share_history (
+  id INTEGER PRIMARY KEY, boat_id TEXT NOT NULL REFERENCES boats(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  old_share REAL, new_share REAL, created_at REAL NOT NULL);
+CREATE INDEX share_history_boat ON share_history(boat_id, id);
+INSERT INTO share_history (boat_id, user_id, old_share, new_share, created_at) SELECT boat_id, user_id, NULL, share_percent, created_at FROM memberships WHERE role = 'owner';
 """
 
 
@@ -69,6 +82,9 @@ class Store:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 db.executescript(SCHEMA)
+                db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version == 1:
+                db.executescript(MIGRATE_1_TO_2)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StoreError(f"the database has schema version {version}; this program expects {SCHEMA_VERSION}")
@@ -138,7 +154,15 @@ class Store:
             db.execute("INSERT INTO boats (id, name, home_port, description, timezone, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
                        (boat_id, name, home_port, description, timezone, user_id, now))
             db.execute("INSERT INTO memberships (boat_id, user_id, role, share_percent, created_at) VALUES (?, ?, 'owner', ?, ?)", (boat_id, user_id, share_percent, now))
+            _log_share(db, boat_id, user_id, None, share_percent, now)
         return boat_id
+
+    def update_boat(self, boat_id: str, name: str, home_port: str, description: str, timezone: str) -> None:
+        """Change a boat's details. Its bookings keep the moment they are at (UTC); a new time zone only changes the days and hours they are shown on."""
+        with self._connect() as db:
+            changed = db.execute("UPDATE boats SET name = ?, home_port = ?, description = ?, timezone = ? WHERE id = ?", (name, home_port, description, timezone, boat_id)).rowcount
+        if not changed:
+            raise StoreError("no such boat")
 
     def get_boat(self, boat_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
@@ -168,6 +192,29 @@ class Store:
         if not changed:
             raise StoreError("that boat is not waiting for a decision")
 
+    def set_share(self, boat_id: str, user_id: str, share_percent: float) -> None:
+        """An owner changes their own share: lower it whenever they like (that frees room for a new owner), or raise it into room nobody holds."""
+        _check_share(share_percent)
+        with self._connect() as db:
+            row = db.execute("SELECT share_percent FROM memberships WHERE boat_id = ? AND user_id = ? AND role = 'owner'", (boat_id, user_id)).fetchone()
+            if not row:
+                raise StoreError("only an owner of this boat has a share")
+            old = row["share_percent"]
+            if abs(share_percent - old) < 1e-9:
+                raise StoreError(f"your share is already {old:g}%")
+            others = db.execute("SELECT COALESCE(SUM(share_percent), 0) FROM memberships WHERE boat_id = ? AND role = 'owner' AND user_id != ?", (boat_id, user_id)).fetchone()[0]
+            if share_percent > 100.0 - others + 1e-9:
+                raise StoreError(f"at most {100.0 - others:g}% is available to you: the other owners hold {others:g}%")
+            db.execute("UPDATE memberships SET share_percent = ? WHERE boat_id = ? AND user_id = ?", (share_percent, boat_id, user_id))
+            _log_share(db, boat_id, user_id, old, share_percent, time.time())
+
+    def share_history(self, boat_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+        """The latest changes to the owners' shares, newest first: old is None for someone joining, new is None for someone leaving."""
+        with self._connect() as db:
+            rows = db.execute("SELECT h.user_id, u.name, h.old_share, h.new_share, h.created_at FROM share_history h JOIN users u ON u.id = h.user_id WHERE h.boat_id = ? "
+                              "ORDER BY h.id DESC LIMIT ?", (boat_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def roles_of_user(self, user_id: str) -> Dict[str, str]:
         with self._connect() as db:
             return {r["boat_id"]: r["role"] for r in db.execute("SELECT boat_id, role FROM memberships WHERE user_id = ?", (user_id,)).fetchall()}
@@ -191,9 +238,11 @@ class Store:
     def remove_member(self, boat_id: str, user_id: str) -> None:
         """Take a member off a boat, with their sign-ons and the bookings they made. A boat always keeps at least one owner."""
         with self._connect() as db:
-            row = db.execute("SELECT role FROM memberships WHERE boat_id = ? AND user_id = ?", (boat_id, user_id)).fetchone()
+            row = db.execute("SELECT role, share_percent FROM memberships WHERE boat_id = ? AND user_id = ?", (boat_id, user_id)).fetchone()
             if not row:
                 raise StoreError("that person is not a member of this boat")
+            if row["role"] == "owner":
+                _log_share(db, boat_id, user_id, row["share_percent"], None, time.time())
             if row["role"] == "owner" and db.execute("SELECT COUNT(*) FROM memberships WHERE boat_id = ? AND role = 'owner'", (boat_id,)).fetchone()[0] == 1:
                 raise StoreError("a boat must keep at least one owner")
             db.execute("DELETE FROM signons WHERE user_id = ? AND booking_id IN (SELECT id FROM bookings WHERE boat_id = ?)", (user_id, boat_id))
@@ -261,9 +310,12 @@ class Store:
                 if req["role"] == "owner":
                     held = db.execute("SELECT COALESCE(SUM(share_percent), 0) FROM memberships WHERE boat_id = ? AND role = 'owner'", (req["boat_id"],)).fetchone()[0]
                     if held + req["share_percent"] > 100.0 + 1e-9:
-                        raise StoreError(f"the owners already hold {held:g}% of this boat; a {req['share_percent']:g}% share does not fit")
+                        raise StoreError(f"the owners already hold {held:g}% of this boat, so a {req['share_percent']:g}% share does not fit; "
+                                         "an owner must lower their own share first")
                 db.execute("INSERT INTO memberships (boat_id, user_id, role, share_percent, created_at) VALUES (?, ?, ?, ?, ?)",
                            (req["boat_id"], req["user_id"], req["role"], req["share_percent"], now))
+                if req["role"] == "owner":
+                    _log_share(db, req["boat_id"], req["user_id"], None, req["share_percent"], now)
             db.execute("UPDATE join_requests SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?", ("approved" if approve else "declined", decider_id, now, request_id))
 
     # ---- bookings and sign-ons --------------------------------------------------------------------------------------------------------------------------------
@@ -334,11 +386,16 @@ class Store:
 
 _BOAT_SELECT = """SELECT b.id, b.name, b.home_port, b.description, b.timezone, b.status, b.created_by, b.created_at,
   (SELECT COUNT(*) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'owner') AS owner_count,
-  (SELECT COUNT(*) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'crew') AS crew_count
+  (SELECT COUNT(*) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'crew') AS crew_count,
+  (SELECT COALESCE(SUM(share_percent), 0) FROM memberships m WHERE m.boat_id = b.id AND m.role = 'owner') AS owner_share_total
   FROM boats b"""
 
 _REQUEST_SELECT = """SELECT r.id, r.boat_id, b.name AS boat_name, r.user_id, u.name AS user_name, r.role, r.share_percent, r.message, r.status, r.created_at
   FROM join_requests r JOIN boats b ON b.id = r.boat_id JOIN users u ON u.id = r.user_id"""
+
+
+def _log_share(db: sqlite3.Connection, boat_id: str, user_id: str, old: Optional[float], new: Optional[float], when: float) -> None:
+    db.execute("INSERT INTO share_history (boat_id, user_id, old_share, new_share, created_at) VALUES (?, ?, ?, ?, ?)", (boat_id, user_id, old, new, when))
 
 
 def _check_share(share: Optional[float]) -> None:

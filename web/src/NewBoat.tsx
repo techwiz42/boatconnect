@@ -2,14 +2,7 @@ import { FormEvent, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { api, ApiError } from "./api";
 import { useAuth } from "./auth";
-
-function zones(): string[] {
-  try {
-    return (Intl as unknown as { supportedValuesOf: (k: string) => string[] }).supportedValuesOf("timeZone");
-  } catch {
-    return ["America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York", "Europe/London", "UTC"];
-  }
-}
+import { zones } from "./zones";
 
 export function NewBoat() {
   const { me } = useAuth();

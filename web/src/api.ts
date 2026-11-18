@@ -22,6 +22,14 @@ export interface MyRequest {
   share_percent: number | null;
 }
 
+export interface ShareChange {
+  user_id: string;
+  name: string;
+  old_share: number | null; // null: they joined as an owner with new_share
+  new_share: number | null; // null: they left the boat
+  created_at: number;
+}
+
 export interface Boat {
   id: string;
   name: string;
@@ -31,9 +39,11 @@ export interface Boat {
   status: "pending" | "approved" | "rejected";
   owner_count: number;
   crew_count: number;
+  unallocated_percent: number; // the part of the boat no owner holds yet: room for a new owner
   my_role: Role | null;
   my_request: MyRequest | null;
   members?: Member[];
+  share_history?: ShareChange[];
 }
 
 export interface Aboard {
@@ -141,8 +151,10 @@ export const api = {
   boats: () => call<Boat[]>("GET", "/api/boats"),
   boat: (id: string) => call<Boat>("GET", `/api/boats/${id}`),
   addBoat: (b: { name: string; home_port: string; description: string; timezone: string; share_percent: number }) => call<{ id: string }>("POST", "/api/boats", b),
+  editBoat: (boatId: string, b: { name: string; home_port: string; description: string; timezone: string }) => call<{ ok: boolean }>("PATCH", `/api/boats/${boatId}`, b),
   join: (boatId: string, role: Role, sharePercent: number | null, message: string) =>
     call<{ id: string }>("POST", `/api/boats/${boatId}/join-requests`, { role, share_percent: sharePercent, message }),
+  setShare: (boatId: string, sharePercent: number) => call<{ ok: boolean }>("PATCH", `/api/boats/${boatId}/my-share`, { share_percent: sharePercent }),
   removeMember: (boatId: string, userId: string) => call<{ ok: boolean }>("DELETE", `/api/boats/${boatId}/members/${userId}`),
   inbox: () => call<Inbox>("GET", "/api/inbox"),
   decideBoat: (boatId: string, approve: boolean) => call<{ ok: boolean }>("POST", `/api/boats/${boatId}/decision`, { approve }),

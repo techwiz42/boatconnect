@@ -224,3 +224,114 @@ def test_a_boat_waiting_for_approval_has_no_calendar(app, make_person):
     sam = make_person("sam@example.com", "Sam")
     boat_id = sam.post("/api/boats", json=BOAT).json()["id"]
     assert sam.get(f"/api/boats/{boat_id}/bookings", params=window()).status_code == 409
+
+
+# ---- editing a boat ------------------------------------------------------------------------------------------------------------------------------------------
+
+EDIT = {"name": "Scooter II", "home_port": "Newport Beach", "description": "Re-rigged", "timezone": "America/Denver"}
+
+
+def test_an_owner_edits_the_boat_and_everyone_sees_it(approved_boat, make_person):
+    boat_id, skipper = approved_boat
+    assert skipper.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 200
+    seen = make_person("anyone@example.com", "Anyone").get(f"/api/boats/{boat_id}").json()
+    assert (seen["name"], seen["home_port"], seen["description"], seen["timezone"], seen["status"]) == ("Scooter II", "Newport Beach", "Re-rigged", "America/Denver", "approved")
+
+
+def test_the_administrator_may_not_edit_a_boat_they_do_not_own(approved_boat, admin):
+    boat_id, _ = approved_boat
+    assert admin.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 403
+    assert admin.get(f"/api/boats/{boat_id}").json()["name"] == "Scooter"
+
+
+def test_any_owner_may_edit_not_only_the_first(approved_boat, make_person, admin):
+    boat_id, _ = approved_boat
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 25}).json()["id"]
+    admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})
+    assert olly.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 200
+
+
+def test_crew_and_strangers_may_not_edit(approved_boat, make_person):
+    boat_id, skipper = approved_boat
+    cass = join_as_crew(boat_id, skipper, make_person)
+    stranger = make_person("stranger@example.com", "Stranger")
+    assert cass.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 403
+    assert stranger.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 403
+    from fastapi.testclient import TestClient
+    assert TestClient(skipper.client.app).patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 401
+    assert skipper.get(f"/api/boats/{boat_id}").json()["name"] == "Scooter"                          # nothing changed
+
+
+def test_an_owner_may_edit_a_boat_that_is_still_waiting_for_approval(make_person):
+    sam = make_person("sam@example.com", "Sam")
+    boat_id = sam.post("/api/boats", json=BOAT).json()["id"]
+    assert sam.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 200
+    assert sam.get(f"/api/boats/{boat_id}").json()["status"] == "pending"                            # editing is not approval
+
+
+def test_a_boat_nobody_may_see_cannot_be_edited_by_a_stranger(make_person):
+    sam, other = make_person("sam@example.com", "Sam"), make_person("other@example.com", "Other")
+    boat_id = sam.post("/api/boats", json=BOAT).json()["id"]
+    assert other.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 404
+
+
+def test_edits_are_validated(approved_boat):
+    boat_id, skipper = approved_boat
+    assert skipper.patch(f"/api/boats/{boat_id}", json={**EDIT, "timezone": "Mars/Olympus"}).status_code == 422
+    assert skipper.patch(f"/api/boats/{boat_id}", json={**EDIT, "name": "   "}).status_code == 422
+    assert skipper.patch(f"/api/boats/{boat_id}", json={**EDIT, "name": "x" * 81}).status_code == 422
+    assert skipper.patch(f"/api/boats/{boat_id}", json={**EDIT, "share_percent": 5}).status_code == 200      # a share sent along is ignored, not applied
+    assert skipper.get(f"/api/boats/{boat_id}").json()["members"][0]["share_percent"] == 50
+
+
+# ---- owners' shares over time ----------------------------------------------------------------------------------------------------------------------------
+
+def test_the_way_to_add_a_fractional_owner_is_that_an_owner_lowers_their_share_first(app, admin, make_person):
+    sam = make_person("sam@example.com", "Sam")
+    boat_id = sam.post("/api/boats", json={**BOAT, "share_percent": 100}).json()["id"]
+    admin.post(f"/api/boats/{boat_id}/decision", json={"approve": True})
+    assert sam.get(f"/api/boats/{boat_id}").json()["unallocated_percent"] == 0
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 25}).json()["id"]
+    refused = admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})
+    assert refused.status_code == 409 and "lower their own share first" in refused.json()["detail"]
+
+    assert sam.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 75}).status_code == 200
+    from fastapi.testclient import TestClient
+    assert TestClient(app).get("/api/boats").json()[0]["unallocated_percent"] == 25               # anyone can see there is room, not who holds what
+    assert admin.post(f"/api/join-requests/{request}/decision", json={"approve": True}).status_code == 200
+    shares = {m["name"]: m["share_percent"] for m in sam.get(f"/api/boats/{boat_id}").json()["members"]}
+    assert shares == {"Sam": 75, "Olly": 25}
+    assert sam.get(f"/api/boats/{boat_id}").json()["unallocated_percent"] == 0
+
+
+def test_an_owner_cannot_take_more_than_is_free_or_change_anothers_share(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat                                                            # holds 50%
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 30}).json()["id"]
+    admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})
+    over = skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 71})          # 20% is free: at most 70
+    assert over.status_code == 409 and "at most 70%" in over.json()["detail"]
+    assert skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 70}).status_code == 200
+    assert skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 0}).status_code == 422
+    members = {m["name"]: m["share_percent"] for m in olly.get(f"/api/boats/{boat_id}").json()["members"]}
+    assert members["Olly"] == 30                                                                # Sam's changes never touch Olly's share
+
+
+def test_only_an_owner_has_a_share_to_change(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    cass = join_as_crew(boat_id, skipper, make_person)
+    for who in (cass, admin, make_person("stranger@example.com", "Stranger")):
+        reply = who.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 10})
+        assert reply.status_code == 409 and "only an owner" in reply.json()["detail"]
+    from fastapi.testclient import TestClient
+    assert TestClient(skipper.client.app).patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 10}).status_code == 401
+
+
+def test_the_share_history_is_for_members(approved_boat, make_person):
+    boat_id, skipper = approved_boat
+    skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 40})
+    history = skipper.get(f"/api/boats/{boat_id}").json()["share_history"]
+    assert [(h["name"], h["old_share"], h["new_share"]) for h in history] == [("Sam Skipper", 50, 40), ("Sam Skipper", None, 50)]
+    assert "share_history" not in make_person("stranger@example.com", "Stranger").get(f"/api/boats/{boat_id}").json()
