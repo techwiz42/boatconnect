@@ -335,3 +335,29 @@ def test_the_share_history_is_for_members(approved_boat, make_person):
     history = skipper.get(f"/api/boats/{boat_id}").json()["share_history"]
     assert [(h["name"], h["old_share"], h["new_share"]) for h in history] == [("Sam Skipper", 50, 40), ("Sam Skipper", None, 50)]
     assert "share_history" not in make_person("stranger@example.com", "Stranger").get(f"/api/boats/{boat_id}").json()
+
+
+def test_when_an_owner_leaves_the_others_may_expand_into_the_room_up_to_100(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat                                                         # Sam holds 50
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 50}).json()["id"]
+    admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})
+    assert skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 60}).status_code == 409      # Olly holds the other 50
+    assert olly.delete(f"/api/boats/{boat_id}/members/{olly.id}").status_code == 200                           # Olly leaves the partnership
+    assert skipper.get(f"/api/boats/{boat_id}").json()["unallocated_percent"] == 50
+    assert skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 100}).status_code == 200
+    assert skipper.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 101}).status_code == 422     # the one limit: never more than 100%
+    history = [(h["name"], h["old_share"], h["new_share"]) for h in skipper.get(f"/api/boats/{boat_id}").json()["share_history"]]
+    assert history[:2] == [("Sam Skipper", 50, 100), ("Olly", 50, None)]
+
+
+def test_one_owner_sells_part_of_their_share_to_another_owner(approved_boat, make_person, admin):
+    boat_id, sam = approved_boat                                                             # Sam 50
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 50}).json()["id"]
+    admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})            # Sam 50, Olly 50
+    assert olly.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 60}).status_code == 409          # nothing free yet
+    assert sam.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 40}).status_code == 200           # Sam sells 10 ...
+    assert olly.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 60}).status_code == 200          # ... and Olly takes it
+    shares = {m["name"]: m["share_percent"] for m in sam.get(f"/api/boats/{boat_id}").json()["members"]}
+    assert shares == {"Sam Skipper": 40, "Olly": 60}

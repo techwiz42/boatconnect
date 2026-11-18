@@ -5,7 +5,7 @@ import { Modal } from "./Modal";
 const pct = (n: number) => `${Math.round(n * 1e6) / 1e6}%`;
 
 /** An owner changes their own share. Lowering it makes room for another owner; raising it only takes room nobody holds. */
-export function ShareDialog({ boatId, current, unallocated, onClose, onSaved }: { boatId: string; current: number; unallocated: number; onClose: () => void; onSaved: () => void }) {
+export function ShareDialog({ boatId, current, others, unallocated, onClose, onSaved }: { boatId: string; current: number; others: number; unallocated: number; onClose: () => void; onSaved: () => void }) {
   const [value, setValue] = useState(String(current));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,14 +28,22 @@ export function ShareDialog({ boatId, current, unallocated, onClose, onSaved }: 
     <Modal title="Your share of the boat" onClose={onClose}>
       <form onSubmit={submit} className="form">
         <p>
-          You hold <strong>{pct(current)}</strong>. {unallocated > 0 ? `${pct(unallocated)} of the boat is not held by any owner, so you can raise your share to at most ${pct(most)}.` : "The owners hold all of the boat, so your share can only go down."}
+          You hold <strong>{pct(current)}</strong>
+          {others > 0 ? `; the other owners hold ${pct(others)}` : ""}
+          {unallocated > 0 ? `; ${pct(unallocated)} is held by no one` : ""}. Owners' shares together can be at most 100%, so you can set yours anywhere from 0.01% up to <strong>{pct(most)}</strong> right now.
+        </p>
+        <p className="hint">
+          {unallocated > 0
+            ? "The room that is free is yours to take, or to leave for a new owner."
+            : "Your share can grow as soon as another owner lowers theirs, sells to you or leaves the boat."}
         </p>
         <label>
           Your share, in percent
           <input type="number" min={0.01} max={most} step="any" value={value} onChange={(e) => setValue(e.target.value)} required autoFocus />
         </label>
         <p className="hint">
-          To add a new owner with a share, lower yours first to make room. They ask to join as an owner, and the administrator approves. Every change is kept in the boat's share history.
+          To add a new owner, lower your share to make room; they ask to join as an owner and the administrator approves. If you sell to an owner already here, lower yours and
+          they raise theirs. Every change is kept in the boat's share history.
         </p>
         {error && (
           <p className="error" role="alert">

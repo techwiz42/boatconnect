@@ -51,7 +51,7 @@ function JoinForm({ boat, onSent }: { boat: Boat; onSent: () => void }) {
           <span className="hint">
             {boat.unallocated_percent > 0
               ? `${pct(boat.unallocated_percent)} of the boat is not held by any owner yet.`
-              : "The owners hold all of the boat. An existing owner has to lower their own share before you can be approved."}
+              : "The owners hold all of the boat right now. You can be approved once an owner lowers their share or leaves."}
           </span>
         </label>
       )}
@@ -152,6 +152,7 @@ export function BoatPage() {
         <ShareDialog
           boatId={boat.id}
           current={boat.members?.find((m) => m.user_id === me?.id)?.share_percent ?? 0}
+          others={(boat.members ?? []).filter((m) => m.role === "owner" && m.user_id !== me?.id).reduce((t, m) => t + (m.share_percent ?? 0), 0)}
           unallocated={boat.unallocated_percent}
           onClose={() => setSharing(false)}
           onSaved={() => {
