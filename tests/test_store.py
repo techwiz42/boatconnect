@@ -239,8 +239,88 @@ def test_a_database_from_before_the_share_history_is_upgraded(tmp_path):
     b = boat(first, owner, 70)
     with sqlite3.connect(path) as db:                                                         # turn it back into a version-1 database
         db.execute("DROP TABLE share_history")
+        db.execute("DROP TABLE calendar_feeds")
+        db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
         db.execute("PRAGMA user_version = 1")
     upgraded = Store(path)
     assert [(h["name"], h["old_share"], h["new_share"]) for h in upgraded.share_history(b)] == [("User 1", None, 70)]
     upgraded.set_share(b, owner, 65)                                                          # and it works as a new one
     assert len(upgraded.share_history(b)) == 2
+
+
+# ---- the calendar feed ----------------------------------------------------------------------------------------------------------------------------------------
+
+def test_a_feed_token_is_made_once_and_reset_replaces_it(store):
+    owner = user(store, 1)
+    first = store.feed_token(owner)
+    assert len(first) >= 40 and store.feed_token(owner) == first                          # asking again does not change the address
+    assert store.user_for_feed(first)["id"] == owner
+    second = store.reset_feed_token(owner)
+    assert second != first and store.user_for_feed(first) is None and store.user_for_feed(second)["id"] == owner
+    assert store.user_for_feed("nope") is None
+
+
+def test_the_feed_holds_the_trips_of_the_boats_a_person_belongs_to_only(store):
+    sam, ann, cat = user(store, 1), user(store, 2), user(store, 3)
+    mine, theirs, waiting = boat(store, sam), boat(store, cat), boat(store, sam)
+    store.decide_boat(mine, True)
+    store.decide_boat(theirs, True)                                                       # `waiting` stays unapproved
+    store.decide_request(store.request_join(mine, ann, "crew", None, ""), sam, True)
+    own = store.create_booking(mine, sam, "Mine", T0, T0 + HOUR, 4, "bring a hat")
+    store.create_booking(theirs, cat, "Not mine", T0, T0 + HOUR, None, "")
+    store.create_booking(waiting, sam, "Unapproved boat", T0, T0 + HOUR, None, "")
+    store.sign_on(own, ann)
+    trips = store.feed_trips(sam, T0 - DAY, T0 + DAY)
+    assert [t["title"] for t in trips] == ["Mine"]
+    assert trips[0]["boat_name"] == "Scooter" and trips[0]["home_port"] == "Marina" and trips[0]["created_by_name"] == "User 1"
+    assert trips[0]["aboard"] == ["User 1", "User 2"] and trips[0]["notes"] == "bring a hat"
+    assert [t["title"] for t in store.feed_trips(ann, T0 - DAY, T0 + DAY)] == ["Mine"]          # crew see the boat's trips too
+    assert [t["title"] for t in store.feed_trips(cat, T0 - DAY, T0 + DAY)] == ["Not mine"]
+
+
+def test_the_feed_window_and_a_removed_member(store):
+    sam, crew = user(store, 1), user(store, 2)
+    b = boat(store, sam)
+    store.decide_boat(b, True)
+    store.decide_request(store.request_join(b, crew, "crew", None, ""), sam, True)
+    store.create_booking(b, sam, "Soon", T0, T0 + HOUR, None, "")
+    store.create_booking(b, sam, "Far off", T0 + 500 * DAY, T0 + 500 * DAY + HOUR, None, "")
+    assert [t["title"] for t in store.feed_trips(crew, T0 - DAY, T0 + 400 * DAY)] == ["Soon"]
+    store.remove_member(b, crew)
+    assert store.feed_trips(crew, T0 - DAY, T0 + 400 * DAY) == []                        # leaving the boat takes its trips out of the feed
+
+
+def test_a_trips_last_change_moves_when_it_or_its_crew_change(store):
+    import time
+    sam, crew = user(store, 1), user(store, 2)
+    b = boat(store, sam)
+    trip = store.create_booking(b, sam, "Trip", T0, T0 + HOUR, None, "")
+    stamp = lambda: store.get_booking(trip)["updated_at"]
+    first = stamp()
+    time.sleep(0.02)
+    store.sign_on(trip, crew)
+    second = stamp()
+    time.sleep(0.02)
+    store.update_booking(trip, "Trip renamed", T0, T0 + HOUR, None, "")
+    third = stamp()
+    time.sleep(0.02)
+    store.sign_off(trip, crew)
+    assert first < second < third < stamp()
+
+
+def test_a_database_from_before_the_calendar_feed_is_upgraded(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "v2.db")
+    first = Store(path)
+    owner = user(first, 1)
+    b = boat(first, owner)
+    trip = first.create_booking(b, owner, "Old trip", T0, T0 + HOUR, None, "")
+    created = first.get_booking(trip)["created_at"]
+    with sqlite3.connect(path) as db:                                                     # turn it back into a version-2 database
+        db.execute("DROP TABLE calendar_feeds")
+        db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
+        db.execute("PRAGMA user_version = 2")
+    upgraded = Store(path)
+    assert upgraded.get_booking(trip)["updated_at"] == created                            # an existing trip's last change starts as its creation
+    token = upgraded.feed_token(owner)
+    assert upgraded.user_for_feed(token)["id"] == owner

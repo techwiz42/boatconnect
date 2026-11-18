@@ -18,11 +18,11 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import auth
+from . import auth, ical
 from .config import Settings
 from .store import BOAT_NAME_CHARS, NAME_CHARS, TEXT_CHARS, Store, StoreError
 
@@ -144,6 +144,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     boats_added = auth.Throttle(limit=5, window_seconds=24 * 3600)          # per user
     requests_made = auth.Throttle(limit=20, window_seconds=24 * 3600)       # per user
     bookings_made = auth.Throttle(limit=60, window_seconds=24 * 3600)       # per user
+    feed_misses = auth.Throttle(limit=30, window_seconds=15 * 60)           # wrong feed addresses, per address
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -460,6 +461,39 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
             raise HTTPException(status_code=403, detail="you may sign yourself off; the trip's maker or an owner may sign others off")
         await db(app.state.store.sign_off, booking_id, member_id)
         return {"ok": True}
+
+    # ---- the private calendar feed ----------------------------------------------------------------------------------------------------------------------------
+
+    FEED_PAST_SECONDS = 30 * 24 * 3600
+    FEED_FUTURE_SECONDS = 400 * 24 * 3600
+
+    @app.get("/api/calendar-feed")
+    async def calendar_feed_link(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
+        """The path of this person's private feed (made on first use). A calendar app cannot log in, so the secret is in the address."""
+        token = await app.state.store.run(app.state.store.feed_token, user["id"])
+        return {"path": f"/api/calendar/{token}.ics"}
+
+    @app.post("/api/calendar-feed/reset", dependencies=[Depends(same_origin)])
+    async def calendar_feed_reset(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
+        token = await app.state.store.run(app.state.store.reset_feed_token, user["id"])
+        return {"path": f"/api/calendar/{token}.ics"}
+
+    @app.get("/api/calendar/{filename}")
+    async def calendar_feed(filename: str, request: Request) -> PlainTextResponse:
+        """The feed itself: the trips of every boat the person belongs to, as an .ics file. No login; the secret in the address is the proof."""
+        where = address(request)
+        if feed_misses.blocked(where):
+            raise HTTPException(status_code=429, detail="too many wrong addresses", headers={"Retry-After": str(feed_misses.retry_after(where))})
+        token = filename[:-4] if filename.endswith(".ics") else ""
+        user = await app.state.store.run(app.state.store.user_for_feed, token) if 20 <= len(token) <= 100 else None
+        if user is None:
+            feed_misses.add(where)
+            raise HTTPException(status_code=404, detail="no such calendar")
+        now = time.time()
+        trips = await app.state.store.run(app.state.store.feed_trips, user["id"], now - FEED_PAST_SECONDS, now + FEED_FUTURE_SECONDS)
+        base = f"{request.url.scheme}://{request.headers.get('host', 'boatconnect.org')}"
+        return PlainTextResponse(ical.build_calendar(trips, base), media_type="text/calendar; charset=utf-8",
+                                 headers={"Cache-Control": "private, max-age=600", "Content-Disposition": 'inline; filename="boatconnect.ics"'})
 
     @app.get("/api/healthz")
     async def healthz() -> Dict[str, bool]:

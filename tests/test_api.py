@@ -394,3 +394,79 @@ def test_the_administrator_may_remove_an_owner_but_not_the_last_one(approved_boa
     assert admin.delete(f"/api/boats/{boat_id}/members/{olly.id}").status_code == 200
     reply = admin.delete(f"/api/boats/{boat_id}/members/{skipper.id}")
     assert reply.status_code == 409 and "at least one owner" in reply.json()["detail"]
+
+
+# ---- the private calendar feed ------------------------------------------------------------------------------------------------------------------------------
+
+def feed_path(person):
+    reply = person.get("/api/calendar-feed")
+    assert reply.status_code == 200, reply.text
+    return reply.json()["path"]
+
+
+def anonymous(app):
+    from fastapi.testclient import TestClient
+    return TestClient(app)
+
+
+def test_the_feed_link_is_private_stable_and_needs_a_login(app, approved_boat):
+    boat_id, skipper = approved_boat
+    assert anonymous(app).get("/api/calendar-feed").status_code == 401
+    path = feed_path(skipper)
+    assert path.startswith("/api/calendar/") and path.endswith(".ics") and len(path) > 60
+    assert feed_path(skipper) == path                                                   # the address does not change by asking again
+
+
+def test_the_feed_works_without_a_login_and_lists_the_members_trips(app, approved_boat, make_person):
+    boat_id, skipper = approved_boat
+    cass = join_as_crew(boat_id, skipper, make_person)
+    trip_id = skipper.post(f"/api/boats/{boat_id}/bookings", json={**TRIP, "title": "Catalina, with friends", "notes": "Bring a hat; water"}).json()["id"]
+    cass.post(f"/api/bookings/{trip_id}/signon")
+    for who in (skipper, cass):
+        reply = anonymous(app).get(feed_path(who))                                      # a calendar app has no cookie
+        assert reply.status_code == 200 and reply.headers["content-type"].startswith("text/calendar")
+        body = reply.text.replace("\r\n ", "")
+        assert "SUMMARY:Scooter: Catalina\\, with friends" in body and f"UID:{trip_id}@" in body
+        assert "Aboard (2 of 4): Sam Skipper\\, Cass" in body
+        assert "Bring a hat\\; water" in body
+        assert "private" in reply.headers["cache-control"]
+
+
+def test_a_person_sees_only_their_own_boats_in_the_feed(app, approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    skipper.post(f"/api/boats/{boat_id}/bookings", json=TRIP)
+    stranger = make_person("stranger@example.com", "Stranger")
+    assert "VEVENT" not in anonymous(app).get(feed_path(stranger)).text                  # not a member of any boat: an empty calendar
+    other = make_person("other@example.com", "Other")
+    other_boat = other.post("/api/boats", json={**BOAT, "name": "Other Boat"}).json()["id"]
+    admin.post(f"/api/boats/{other_boat}/decision", json={"approve": True})
+    other.post(f"/api/boats/{other_boat}/bookings", json={**TRIP, "title": "Private trip"})
+    assert "Private trip" not in anonymous(app).get(feed_path(skipper)).text
+
+
+def test_leaving_a_boat_takes_its_trips_out_of_the_feed(app, approved_boat, make_person):
+    boat_id, skipper = approved_boat
+    cass = join_as_crew(boat_id, skipper, make_person)
+    skipper.post(f"/api/boats/{boat_id}/bookings", json=TRIP)
+    path = feed_path(cass)
+    assert "VEVENT" in anonymous(app).get(path).text
+    cass.delete(f"/api/boats/{boat_id}/members/{cass.id}")
+    assert "VEVENT" not in anonymous(app).get(path).text
+
+
+def test_resetting_the_link_stops_the_old_one(app, approved_boat):
+    boat_id, skipper = approved_boat
+    old = feed_path(skipper)
+    new = skipper.post("/api/calendar-feed/reset").json()["path"]
+    assert new != old and feed_path(skipper) == new
+    assert anonymous(app).get(old).status_code == 404 and anonymous(app).get(new).status_code == 200
+    assert anonymous(app).post("/api/calendar-feed/reset").status_code == 401
+
+
+def test_wrong_feed_addresses_are_refused_and_then_throttled(app):
+    client = anonymous(app)
+    assert client.get("/api/calendar/" + "x" * 43 + ".ics").status_code == 404
+    assert client.get("/api/calendar/short.ics").status_code == 404
+    assert client.get("/api/calendar/" + "y" * 43).status_code == 404                    # no .ics
+    codes = [client.get(f"/api/calendar/{'z' * 42}{i % 10}.ics").status_code for i in range(40)]
+    assert 429 in codes                                                                   # a guesser is stopped

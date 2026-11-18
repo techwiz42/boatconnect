@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError, Boat, Me, Trip } from "./api";
 import { addMonths, dayOf, formatTime, formatWhen, gridRange, hiddenPerDay, layoutWeek, monthGrid, monthTitle, WEEKDAYS } from "./calendarMath";
+import { FeedDialog } from "./FeedDialog";
 import { TripDetail, TripForm } from "./TripDialogs";
 
 const VISIBLE_LANES = 3;
@@ -21,6 +22,7 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null); // the id of the trip being looked at
   const [form, setForm] = useState<{ trip?: Trip; day?: string } | null>(null);
+  const [feedOpen, setFeedOpen] = useState(false);
   const isOwner = boat.my_role === "owner";
 
   const weeks = useMemo(() => monthGrid(view.year, view.month), [view]);
@@ -61,6 +63,9 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
           </button>
           <button type="button" className="button secondary" onClick={() => step(1)} aria-label="Next month">
             ›
+          </button>
+          <button type="button" className="button secondary" onClick={() => setFeedOpen(true)}>
+            Add to my calendar
           </button>
           {isOwner && (
             <button type="button" className="button" onClick={() => setForm({ day: today })}>
@@ -167,6 +172,7 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
           onEdit={() => setForm({ trip: current })}
         />
       )}
+      {feedOpen && <FeedDialog onClose={() => setFeedOpen(false)} />}
       {form && (
         <TripForm
           boatId={boat.id}

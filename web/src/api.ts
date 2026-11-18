@@ -155,6 +155,8 @@ export const api = {
   join: (boatId: string, role: Role, sharePercent: number | null, message: string) =>
     call<{ id: string }>("POST", `/api/boats/${boatId}/join-requests`, { role, share_percent: sharePercent, message }),
   setShare: (boatId: string, sharePercent: number) => call<{ ok: boolean }>("PATCH", `/api/boats/${boatId}/my-share`, { share_percent: sharePercent }),
+  calendarFeed: () => call<{ path: string }>("GET", "/api/calendar-feed"),
+  resetCalendarFeed: () => call<{ path: string }>("POST", "/api/calendar-feed/reset"),
   removeMember: (boatId: string, userId: string) => call<{ ok: boolean }>("DELETE", `/api/boats/${boatId}/members/${userId}`),
   inbox: () => call<Inbox>("GET", "/api/inbox"),
   decideBoat: (boatId: string, approve: boolean) => call<{ ok: boolean }>("POST", `/api/boats/${boatId}/decision`, { approve }),

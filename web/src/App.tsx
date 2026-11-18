@@ -74,7 +74,12 @@ export default function App() {
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
-        <footer className="site-footer">boatconnect · share a boat, share the calendar</footer>
+        <footer className="site-footer">
+          © 2026 Peter Sisk · <a href="mailto:j35.scooter@gmail.com">j35.scooter@gmail.com</a> ·{" "}
+          <a href="https://github.com/techwiz42/boatconnect" target="_blank" rel="noopener noreferrer">
+            GitHub
+          </a>
+        </footer>
       </AuthProvider>
     </BrowserRouter>
   );

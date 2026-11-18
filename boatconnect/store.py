@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sqlite3
 import time
 import uuid
@@ -15,7 +16,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 NAME_CHARS = 60
 BOAT_NAME_CHARS = 80
@@ -45,7 +46,8 @@ CREATE TABLE join_requests (
 CREATE UNIQUE INDEX join_requests_one_pending ON join_requests(boat_id, user_id) WHERE status = 'pending';
 CREATE TABLE bookings (
   id TEXT PRIMARY KEY, boat_id TEXT NOT NULL REFERENCES boats(id) ON DELETE CASCADE, created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title TEXT NOT NULL, start_utc REAL NOT NULL, end_utc REAL NOT NULL, capacity INTEGER, notes TEXT NOT NULL, created_at REAL NOT NULL, CHECK (end_utc > start_utc));
+  title TEXT NOT NULL, start_utc REAL NOT NULL, end_utc REAL NOT NULL, capacity INTEGER, notes TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL DEFAULT 0,
+  CHECK (end_utc > start_utc));
 CREATE INDEX bookings_boat_time ON bookings(boat_id, start_utc);
 CREATE TABLE signons (
   booking_id TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL,
@@ -54,6 +56,8 @@ CREATE TABLE share_history (
   id INTEGER PRIMARY KEY, boat_id TEXT NOT NULL REFERENCES boats(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   old_share REAL, new_share REAL, created_at REAL NOT NULL);
 CREATE INDEX share_history_boat ON share_history(boat_id, id);
+CREATE TABLE calendar_feeds (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, token TEXT NOT NULL UNIQUE, created_at REAL NOT NULL);
 """
 
 # Version 2 keeps a history of owners' shares (who joined with what, who changed theirs, who left). The owners that exist when it is made start with the share they joined with.
@@ -63,6 +67,14 @@ CREATE TABLE share_history (
   old_share REAL, new_share REAL, created_at REAL NOT NULL);
 CREATE INDEX share_history_boat ON share_history(boat_id, id);
 INSERT INTO share_history (boat_id, user_id, old_share, new_share, created_at) SELECT boat_id, user_id, NULL, share_percent, created_at FROM memberships WHERE role = 'owner';
+"""
+
+# Version 3 adds the private calendar-feed links, and when each booking last changed (what the feed tells calendars).
+MIGRATE_2_TO_3 = """
+CREATE TABLE calendar_feeds (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, token TEXT NOT NULL UNIQUE, created_at REAL NOT NULL);
+ALTER TABLE bookings ADD COLUMN updated_at REAL NOT NULL DEFAULT 0;
+UPDATE bookings SET updated_at = created_at;
 """
 
 
@@ -83,8 +95,10 @@ class Store:
             if version == 0:
                 db.executescript(SCHEMA)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version == 1:
-                db.executescript(MIGRATE_1_TO_2)
+            elif version in (1, 2):
+                if version == 1:
+                    db.executescript(MIGRATE_1_TO_2)
+                db.executescript(MIGRATE_2_TO_3)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StoreError(f"the database has schema version {version}; this program expects {SCHEMA_VERSION}")
@@ -327,8 +341,8 @@ class Store:
         booking_id, now = uuid.uuid4().hex, time.time()
         with self._connect() as db:
             _check_no_overlap(db, boat_id, start, end, None)
-            db.execute("INSERT INTO bookings (id, boat_id, created_by, title, start_utc, end_utc, capacity, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                       (booking_id, boat_id, user_id, title, start, end, capacity, notes, now))
+            db.execute("INSERT INTO bookings (id, boat_id, created_by, title, start_utc, end_utc, capacity, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (booking_id, boat_id, user_id, title, start, end, capacity, notes, now, now))
             db.execute("INSERT INTO signons (booking_id, user_id, created_at) VALUES (?, ?, ?)", (booking_id, user_id, now))
         return booking_id
 
@@ -340,7 +354,8 @@ class Store:
                 raise StoreError("that booking does not exist")
             _check_capacity(capacity, db.execute("SELECT COUNT(*) FROM signons WHERE booking_id = ?", (booking_id,)).fetchone()[0])
             _check_no_overlap(db, row["boat_id"], start, end, booking_id)
-            db.execute("UPDATE bookings SET title = ?, start_utc = ?, end_utc = ?, capacity = ?, notes = ? WHERE id = ?", (title, start, end, capacity, notes, booking_id))
+            db.execute("UPDATE bookings SET title = ?, start_utc = ?, end_utc = ?, capacity = ?, notes = ?, updated_at = ? WHERE id = ?",
+                       (title, start, end, capacity, notes, time.time(), booking_id))
 
     def delete_booking(self, booking_id: str) -> None:
         with self._connect() as db:
@@ -374,6 +389,7 @@ class Store:
             if row["capacity"] is not None and db.execute("SELECT COUNT(*) FROM signons WHERE booking_id = ?", (booking_id,)).fetchone()[0] >= row["capacity"]:
                 raise StoreError("this trip is full")
             db.execute("INSERT INTO signons (booking_id, user_id, created_at) VALUES (?, ?, ?)", (booking_id, user_id, time.time()))
+            db.execute("UPDATE bookings SET updated_at = ? WHERE id = ?", (time.time(), booking_id))
 
     def sign_off(self, booking_id: str, user_id: str) -> None:
         with self._connect() as db:
@@ -382,6 +398,40 @@ class Store:
                 raise StoreError("the person who made a booking stays aboard it; delete the booking instead")
             if not db.execute("DELETE FROM signons WHERE booking_id = ? AND user_id = ?", (booking_id, user_id)).rowcount:
                 raise StoreError("that person is not signed on")
+            db.execute("UPDATE bookings SET updated_at = ? WHERE id = ?", (time.time(), booking_id))
+
+
+    # ---- the private calendar feed ----------------------------------------------------------------------------------------------------------------------------
+
+    def feed_token(self, user_id: str) -> str:
+        """The secret in the person's calendar-feed address, made on first use. Anyone who holds it can read the person's trips, so it is shown only to them."""
+        with self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO calendar_feeds (user_id, token, created_at) VALUES (?, ?, ?)", (user_id, secrets.token_urlsafe(32), time.time()))
+            return db.execute("SELECT token FROM calendar_feeds WHERE user_id = ?", (user_id,)).fetchone()["token"]
+
+    def reset_feed_token(self, user_id: str) -> str:
+        """A new secret; the old address stops working."""
+        with self._connect() as db:
+            token = secrets.token_urlsafe(32)
+            db.execute("INSERT INTO calendar_feeds (user_id, token, created_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET token = excluded.token, created_at = excluded.created_at",
+                       (user_id, token, time.time()))
+        return token
+
+    def user_for_feed(self, token: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute("SELECT u.id, u.name FROM calendar_feeds f JOIN users u ON u.id = f.user_id WHERE f.token = ?", (token,)).fetchone()
+        return dict(row) if row else None
+
+    def feed_trips(self, user_id: str, since: float, until: float) -> List[Dict[str, Any]]:
+        """Trips of every approved boat the person belongs to that overlap [since, until), earliest first, each with the names aboard."""
+        with self._connect() as db:
+            rows = db.execute("SELECT k.id, k.boat_id, k.title, k.start_utc, k.end_utc, k.capacity, k.notes, k.updated_at, b.name AS boat_name, b.home_port, u.name AS created_by_name "
+                              "FROM bookings k JOIN boats b ON b.id = k.boat_id AND b.status = 'approved' JOIN memberships m ON m.boat_id = b.id AND m.user_id = ? "
+                              "JOIN users u ON u.id = k.created_by WHERE k.end_utc > ? AND k.start_utc < ? ORDER BY k.start_utc, k.id", (user_id, since, until)).fetchall()
+            trips = [dict(r) for r in rows]
+            for trip in trips:
+                trip["aboard"] = [r["name"] for r in db.execute("SELECT u.name FROM signons s JOIN users u ON u.id = s.user_id WHERE s.booking_id = ? ORDER BY s.created_at, u.name", (trip["id"],))]
+        return trips
 
 
 _BOAT_SELECT = """SELECT b.id, b.name, b.home_port, b.description, b.timezone, b.status, b.created_by, b.created_at,
