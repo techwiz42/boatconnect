@@ -8,12 +8,13 @@ a month calendar like Google Calendar's.
 - **Shares over time**: owners' shares may add up to at most 100%. An owner can lower their own share (or raise it into room nobody holds); that makes room for a new owner,
   who is then approved as usual. Every change is kept in the boat's share history, which its members can read.
 - **Editing**: only an owner can change a boat's name, port, description and time zone.
+- **Leaving**: a member can leave; an owner can remove crew; an owner leaves only by their own choice (the administrator can also remove anyone). A boat keeps at least one owner.
 - **Trips**: an owner books the boat with a start and an end time. Crew and other owners **sign on** to a trip, and any number can be aboard. Two trips of one boat may not
   overlap. A trip may have a limit on how many can come.
 - The calendar is shown in the boat's own time zone; the server stores UTC.
 - Only a boat's members see its calendar and who belongs to it.
 
-The page background is a photograph at 20% strength: `--background-opacity` in `web/src/styles.css`.
+The page background is a photograph at 30% strength: `--background-opacity` in `web/src/styles.css`.
 
 ## Run it
 

@@ -190,7 +190,7 @@ export function BoatPage() {
                         </button>
                       </span>
                     ) : (
-                      boat.my_role === "owner" && (
+                      boat.my_role === "owner" && m.role === "crew" && (
                         <button type="button" className="link-button" onClick={() => remove(m.user_id, `Remove ${m.name} from the boat? Their trips and sign-ons are removed.`)}>
                           Remove
                         </button>

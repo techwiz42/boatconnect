@@ -361,3 +361,36 @@ def test_one_owner_sells_part_of_their_share_to_another_owner(approved_boat, mak
     assert olly.patch(f"/api/boats/{boat_id}/my-share", json={"share_percent": 60}).status_code == 200          # ... and Olly takes it
     shares = {m["name"]: m["share_percent"] for m in sam.get(f"/api/boats/{boat_id}").json()["members"]}
     assert shares == {"Sam Skipper": 40, "Olly": 60}
+
+
+# ---- who may be removed ------------------------------------------------------------------------------------------------------------------------------------
+
+def two_owners_and_crew(boat_id, skipper, make_person, admin):
+    olly = make_person("olly@example.com", "Olly")
+    request = olly.post(f"/api/boats/{boat_id}/join-requests", json={"role": "owner", "share_percent": 25}).json()["id"]
+    admin.post(f"/api/join-requests/{request}/decision", json={"approve": True})
+    return olly, join_as_crew(boat_id, skipper, make_person)
+
+
+def test_an_owner_cannot_remove_another_owner(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    olly, _ = two_owners_and_crew(boat_id, skipper, make_person, admin)
+    reply = skipper.delete(f"/api/boats/{boat_id}/members/{olly.id}")
+    assert reply.status_code == 403 and "only by their own choice" in reply.json()["detail"]
+    assert olly.delete(f"/api/boats/{boat_id}/members/{skipper.id}").status_code == 403
+    assert {m["name"] for m in skipper.get(f"/api/boats/{boat_id}").json()["members"]} >= {"Sam Skipper", "Olly"}        # both still there
+
+
+def test_an_owner_may_remove_crew_and_an_owner_may_leave_by_choice(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    olly, cass = two_owners_and_crew(boat_id, skipper, make_person, admin)
+    assert olly.delete(f"/api/boats/{boat_id}/members/{cass.id}").status_code == 200
+    assert olly.delete(f"/api/boats/{boat_id}/members/{olly.id}").status_code == 200
+
+
+def test_the_administrator_may_remove_an_owner_but_not_the_last_one(approved_boat, make_person, admin):
+    boat_id, skipper = approved_boat
+    olly, _ = two_owners_and_crew(boat_id, skipper, make_person, admin)
+    assert admin.delete(f"/api/boats/{boat_id}/members/{olly.id}").status_code == 200
+    reply = admin.delete(f"/api/boats/{boat_id}/members/{skipper.id}")
+    assert reply.status_code == 409 and "at least one owner" in reply.json()["detail"]

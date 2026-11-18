@@ -8,7 +8,7 @@
   --surface: rgba(255, 255, 255, 0.9);
   --sky: #e6eff6;
   /* how strongly the photo shows through behind every page; 0 hides it, 1 is the photo at full strength */
-  --background-opacity: 0.2;
+  --background-opacity: 0.3;
 }
 
 * {

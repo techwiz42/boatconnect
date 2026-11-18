@@ -342,10 +342,13 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
 
     @app.delete("/api/boats/{boat_id}/members/{member_id}", dependencies=[Depends(same_origin)])
     async def remove_member(boat_id: str, member_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        """A member may leave. An owner may remove crew. An owner leaves only by their own choice: another owner cannot remove them, only the administrator can."""
         await visible_boat(boat_id, user)
-        mine = await app.state.store.run(app.state.store.role_of, boat_id, user["id"])
-        if member_id != user["id"] and mine != "owner" and not is_admin(user):
-            raise HTTPException(status_code=403, detail="only an owner may remove someone from the boat")
+        if member_id != user["id"] and not is_admin(user):
+            mine = await app.state.store.run(app.state.store.role_of, boat_id, user["id"])
+            theirs = await app.state.store.run(app.state.store.role_of, boat_id, member_id)
+            if not (mine == "owner" and theirs == "crew"):
+                raise HTTPException(status_code=403, detail="an owner may remove crew; an owner leaves only by their own choice, or the administrator removes them")
         await db(app.state.store.remove_member, boat_id, member_id)
         return {"ok": True}
 
