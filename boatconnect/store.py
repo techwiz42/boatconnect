@@ -16,7 +16,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 NAME_CHARS = 60
 BOAT_NAME_CHARS = 80
@@ -27,7 +27,7 @@ MAX_BOOKING_SECONDS = 30 * 24 * 3600
 SCHEMA = """
 CREATE TABLE users (
   id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at REAL NOT NULL,
-  login_count INTEGER NOT NULL DEFAULT 0, last_login_at REAL);
+  login_count INTEGER NOT NULL DEFAULT 0, last_login_at REAL, email_trips INTEGER NOT NULL DEFAULT 1, mail_token TEXT);
 CREATE TABLE auth_sessions (
   token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL, expires_at REAL NOT NULL);
 CREATE TABLE boats (
@@ -60,6 +60,8 @@ CREATE TABLE calendar_feeds (
   user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, token TEXT NOT NULL UNIQUE, created_at REAL NOT NULL);
 CREATE TABLE boat_photos (
   boat_id TEXT PRIMARY KEY REFERENCES boats(id) ON DELETE CASCADE, data BLOB NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE password_resets (
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
 """
 
 # Version 2 keeps a history of owners' shares (who joined with what, who changed theirs, who left). The owners that exist when it is made start with the share they joined with.
@@ -85,6 +87,15 @@ CREATE TABLE boat_photos (
   boat_id TEXT PRIMARY KEY REFERENCES boats(id) ON DELETE CASCADE, data BLOB NOT NULL, updated_at REAL NOT NULL);
 """
 
+# Version 5 is for mail: whether a person wants emails about trips, the secret in their one-click unsubscribe link (made for everyone already registered), and password-reset links.
+MIGRATE_4_TO_5 = """
+ALTER TABLE users ADD COLUMN email_trips INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE users ADD COLUMN mail_token TEXT;
+UPDATE users SET mail_token = lower(hex(randomblob(24))) WHERE mail_token IS NULL;
+CREATE TABLE password_resets (
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
+"""
+
 
 class StoreError(Exception):
     """A request the store refuses (a duplicate email, an overlapping booking). The message is safe to show the user."""
@@ -103,12 +114,14 @@ class Store:
             if version == 0:
                 db.executescript(SCHEMA)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version in (1, 2, 3):
+            elif version in (1, 2, 3, 4):
                 if version == 1:
                     db.executescript(MIGRATE_1_TO_2)
                 if version in (1, 2):
                     db.executescript(MIGRATE_2_TO_3)
-                db.executescript(MIGRATE_3_TO_4)
+                if version in (1, 2, 3):
+                    db.executescript(MIGRATE_3_TO_4)
+                db.executescript(MIGRATE_4_TO_5)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StoreError(f"the database has schema version {version}; this program expects {SCHEMA_VERSION}")
@@ -133,7 +146,8 @@ class Store:
         user_id = uuid.uuid4().hex
         try:
             with self._connect() as db:
-                db.execute("INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, email, name, password_hash, time.time()))
+                db.execute("INSERT INTO users (id, email, name, password_hash, created_at, mail_token) VALUES (?, ?, ?, ?, ?, ?)",
+                           (user_id, email, name, password_hash, time.time(), secrets.token_urlsafe(24)))
         except sqlite3.IntegrityError:
             raise StoreError("that email is already registered")
         return user_id
@@ -160,13 +174,65 @@ class Store:
 
     def user_for_login(self, token_hash: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
-            row = db.execute("SELECT u.id, u.email, u.name FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+            row = db.execute("SELECT u.id, u.email, u.name, u.email_trips FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
                              (token_hash, time.time())).fetchone()
         return dict(row) if row else None
 
     def end_login(self, token_hash: str) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+
+    def user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute("SELECT id, email, name, email_trips, mail_token FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    # ---- mail: who is told what -------------------------------------------------------------------------------------------------------------------------------
+
+    def boat_owners(self, boat_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT u.id, u.email, u.name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? AND m.role = 'owner' ORDER BY u.name", (boat_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def trip_recipients(self, boat_id: str, exclude_user_id: str) -> List[Dict[str, Any]]:
+        """The members of a boat, except one, who want to hear about trips; each with the secret of their own unsubscribe link."""
+        with self._connect() as db:
+            rows = db.execute("SELECT u.id, u.email, u.name, u.mail_token FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? AND u.id != ? AND u.email_trips = 1 "
+                              "ORDER BY u.name", (boat_id, exclude_user_id)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_email_trips(self, user_id: str, wanted: bool) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE users SET email_trips = ? WHERE id = ?", (1 if wanted else 0, user_id))
+
+    def unsubscribe_trips(self, mail_token: str) -> bool:
+        """The one-click link in a trip email: stop trip emails for whoever holds this secret. False when no one does."""
+        if not mail_token:
+            return False
+        with self._connect() as db:
+            return db.execute("UPDATE users SET email_trips = 0 WHERE mail_token = ?", (mail_token,)).rowcount > 0
+
+    # ---- forgotten passwords ----------------------------------------------------------------------------------------------------------------------------------
+
+    def create_password_reset(self, user_id: str, token_hash: str, lifetime_seconds: float) -> None:
+        now = time.time()
+        with self._connect() as db:
+            db.execute("DELETE FROM password_resets WHERE expires_at < ? OR used_at IS NOT NULL", (now,))
+            db.execute("INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)", (token_hash, user_id, now, now + lifetime_seconds))
+
+    def reset_password(self, token_hash: str, new_password_hash: str) -> str:
+        """Use a reset link once: set the new password, end every login of that person (whoever had the old password is out), and cancel their other reset links."""
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute("SELECT user_id FROM password_resets WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?", (token_hash, now)).fetchone()
+            if not row:
+                raise StoreError("this link has expired or was already used; ask for a new one")
+            user_id = row["user_id"]
+            db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_password_hash, user_id))
+            db.execute("UPDATE password_resets SET used_at = ? WHERE token_hash = ?", (now, token_hash))
+            db.execute("DELETE FROM password_resets WHERE user_id = ? AND token_hash != ?", (user_id, token_hash))
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        return user_id
 
     # ---- boats ------------------------------------------------------------------------------------------------------------------------------------------------
 

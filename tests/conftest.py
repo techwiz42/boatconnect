@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from boatconnect import auth
+from boatconnect.mail import Mailer
 from boatconnect.server import create_app
 from boatconnect.store import Store
 
@@ -19,9 +20,28 @@ def store(tmp_path):
     return Store(str(tmp_path / "test.db"))
 
 
+class FakeMailer(Mailer):
+    """Records what would have been sent: a list of (recipients, Mail)."""
+    enabled = True
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, to, mail):
+        self.sent.append((list(to), mail))
+
+    def to(self, address):
+        return [mail for recipients, mail in self.sent if address in recipients]
+
+
 @pytest.fixture
-def app(store):
-    return create_app(store=store, admin_emails=(ADMIN,))
+def mailer():
+    return FakeMailer()
+
+
+@pytest.fixture
+def app(store, mailer):
+    return create_app(store=store, admin_emails=(ADMIN,), mailer=mailer, public_url="https://boatconnect.test")
 
 
 class Person:

@@ -12,7 +12,7 @@ def window(**extra):
 
 def test_register_login_me_logout(app, make_person):
     sam = make_person("sam@example.com", "Sam")
-    assert sam.get("/api/auth/me").json() == {"id": sam.id, "email": "sam@example.com", "name": "Sam", "is_admin": False}
+    assert sam.get("/api/auth/me").json() == {"id": sam.id, "email": "sam@example.com", "name": "Sam", "is_admin": False, "email_trips": True}
     assert sam.post("/api/auth/logout").status_code == 200
     assert sam.get("/api/auth/me").status_code == 401
     reply = sam.post("/api/auth/login", json={"email": "SAM@example.com", "password": "correct horse battery"})

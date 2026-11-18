@@ -34,6 +34,20 @@ Open http://127.0.0.1:8001. For front-end work, `cd web && npm run dev` serves o
 (cd web && npm test)              # the calendar arithmetic (months, time zones, bars)
 ```
 
+## Email
+
+Sent through an SMTP relay (in production Google Workspace's `smtp-relay.gmail.com`, which trusts the VM by its fixed address, so no password is kept). With `MAIL_HOST` empty nothing
+is sent and the features that need mail say so.
+
+- Owners are told of requests to join; the administrator of new boats and owner requests; people of the decision on their request or boat.
+- Members are told when a trip is booked, changed (time or title) or cancelled, unless they turned that off in **Your account**; every such email carries a one-click unsubscribe link
+  (`List-Unsubscribe`) and a link to a page that asks first.
+- **Forgot your password?** mails a link that works once for an hour, sets the new password and ends every login of that person. The answer never says whether an address has an account.
+- Everything a user typed is HTML-escaped in emails and kept on one line in subjects; links point only at `PUBLIC_URL`.
+
+To try it locally without a real mail server: `python3 -u -W ignore -m smtpd -n -c DebuggingServer 127.0.0.1:1025` and start the server with
+`MAIL_HOST=127.0.0.1 MAIL_PORT=1025 MAIL_STARTTLS=0 PUBLIC_URL=http://127.0.0.1:8001`.
+
 ## Settings
 
-See `.env.example`: `DATA_DIR`, `ADMIN_EMAILS`, `COOKIE_SECURE`.
+See `.env.example`: `DATA_DIR`, `ADMIN_EMAILS`, `COOKIE_SECURE`, and for email `MAIL_HOST`, `MAIL_PORT`, `MAIL_FROM`, `MAIL_REPLY_TO`, `PUBLIC_URL` (`MAIL_STARTTLS=0` only for a local test server).

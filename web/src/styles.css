@@ -899,3 +899,34 @@ input[type="checkbox"] {
     height: 10rem;
   }
 }
+
+.site-header nav a.who-name {
+  color: #fff;
+  border-bottom-color: transparent;
+}
+
+.site-header nav a.who-name:hover {
+  border-bottom-color: #fff;
+}
+
+.setting {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--line);
+  font-weight: 400;
+}
+
+.setting input {
+  margin-top: 0.3rem;
+}
+
+.good-note {
+  color: #19633a;
+  background: #e5f5ec;
+  border: 1px solid #a9d9bd;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  margin: 0.5rem 0;
+}

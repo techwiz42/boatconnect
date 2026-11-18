@@ -12,6 +12,12 @@ class Settings:
     data_dir: Path
     admin_emails: Tuple[str, ...]
     cookie_secure: bool
+    mail_host: str                      # the SMTP relay; empty means no mail is sent
+    mail_port: int
+    mail_starttls: bool                 # the relay is always reached over TLS; off only for a local test server
+    mail_from: str
+    mail_reply_to: str
+    public_url: str                     # what links in emails point at
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
@@ -21,4 +27,10 @@ class Settings:
             data_dir=Path(env.get("DATA_DIR") or Path(__file__).resolve().parent.parent / "data"),
             admin_emails=admins,
             cookie_secure=env.get("COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes"),
+            mail_host=env.get("MAIL_HOST", "").strip(),
+            mail_port=int(env.get("MAIL_PORT", "587") or 587),
+            mail_starttls=env.get("MAIL_STARTTLS", "1").strip().lower() not in ("0", "false", "no"),
+            mail_from=env.get("MAIL_FROM", "boatconnect <noreply@boatconnect.org>").strip(),
+            mail_reply_to=env.get("MAIL_REPLY_TO", "").strip(),
+            public_url=(env.get("PUBLIC_URL", "https://boatconnect.org").strip().rstrip("/")),
         )

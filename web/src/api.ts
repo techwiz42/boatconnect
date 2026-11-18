@@ -5,6 +5,7 @@ export interface Me {
   email: string;
   name: string;
   is_admin: boolean;
+  email_trips: boolean; // whether they want an email when a trip on one of their boats is booked, changed or cancelled
 }
 
 export type Role = "owner" | "crew";
@@ -153,6 +154,10 @@ export const api = {
   register: (email: string, name: string, password: string) => call<Me>("POST", "/api/auth/register", { email, name, password }),
   login: (email: string, password: string) => call<Me>("POST", "/api/auth/login", { email, password }),
   logout: () => call<{ ok: boolean }>("POST", "/api/auth/logout"),
+  forgot: (email: string) => call<{ ok: boolean }>("POST", "/api/auth/forgot", { email }),
+  reset: (token: string, password: string) => call<{ ok: boolean }>("POST", "/api/auth/reset", { token, password }),
+  unsubscribe: (token: string) => call<{ ok: boolean }>("POST", `/api/unsubscribe/${encodeURIComponent(token)}`),
+  setPreferences: (emailTrips: boolean) => call<Me>("PATCH", "/api/auth/preferences", { email_trips: emailTrips }),
   boats: () => call<Boat[]>("GET", "/api/boats"),
   boat: (id: string) => call<Boat>("GET", `/api/boats/${id}`),
   addBoat: (b: { name: string; home_port: string; description: string; timezone: string; share_percent: number }) => call<{ id: string }>("POST", "/api/boats", b),

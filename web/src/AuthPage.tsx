@@ -56,6 +56,11 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
           {registering ? "Create account" : "Log in"}
         </button>
       </form>
+      {!registering && (
+        <p className="hint">
+          <Link to="/forgot">Forgot your password?</Link>
+        </p>
+      )}
       <p className="hint">
         {registering ? (
           <>

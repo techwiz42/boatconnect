@@ -3,6 +3,7 @@ import { api } from "./api";
 import { AuthPage } from "./AuthPage";
 import { AuthProvider, useAuth } from "./auth";
 import { BoatPage } from "./BoatPage";
+import { Account, Forgot, Reset, Unsubscribe } from "./Account";
 import { Inbox } from "./Inbox";
 import { Landing } from "./Landing";
 import { NewBoat } from "./NewBoat";
@@ -36,7 +37,9 @@ function Header() {
         {me === null && <NavLink to="/register">Register</NavLink>}
         {me && (
           <span className="who">
-            {me.name}
+            <Link to="/account" className="who-name">
+              {me.name}
+            </Link>
             <button type="button" className="link-button" onClick={logout}>
               Log out
             </button>
@@ -71,6 +74,10 @@ export default function App() {
             <Route path="/boats/new" element={<NewBoat />} />
             <Route path="/boats/:id" element={<BoatPage />} />
             <Route path="/inbox" element={<Inbox />} />
+            <Route path="/account" element={<Account />} />
+            <Route path="/forgot" element={<Forgot />} />
+            <Route path="/reset" element={<Reset />} />
+            <Route path="/unsubscribe" element={<Unsubscribe />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

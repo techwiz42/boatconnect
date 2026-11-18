@@ -17,13 +17,14 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import auth, ical, photos
+from . import auth, emails, ical, photos
 from .config import Settings
+from .mail import Mail, Mailer, NoMailer, SmtpMailer
 from .store import BOAT_NAME_CHARS, NAME_CHARS, TEXT_CHARS, Store, StoreError
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,19 @@ class ShareIn(BaseModel):
     share_percent: float = Field(gt=0, le=100)
 
 
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(max_length=200)
+    password: str = Field(max_length=500)
+
+
+class PreferencesIn(BaseModel):
+    email_trips: bool
+
+
 class JoinIn(BaseModel):
     role: str = Field(pattern="^(owner|crew)$")
     share_percent: Optional[float] = Field(default=None, gt=0, le=100)
@@ -138,7 +152,8 @@ class BookingIn(BaseModel):
         return value
 
 
-def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin_emails: Tuple[str, ...] = ()) -> FastAPI:
+def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin_emails: Tuple[str, ...] = (), mailer: Optional[Mailer] = None,
+               public_url: str = "https://boatconnect.org") -> FastAPI:
     login_failures = auth.Throttle(limit=5, window_seconds=15 * 60)         # per email
     address_failures = auth.Throttle(limit=30, window_seconds=15 * 60)      # per address
     registrations = auth.Throttle(limit=20, window_seconds=3600)            # per address
@@ -147,6 +162,10 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     bookings_made = auth.Throttle(limit=60, window_seconds=24 * 3600)       # per user
     photos_sent = auth.Throttle(limit=30, window_seconds=24 * 3600)         # per user
     feed_misses = auth.Throttle(limit=30, window_seconds=15 * 60)           # wrong feed addresses, per address
+    forgot_by_address = auth.Throttle(limit=8, window_seconds=3600)         # password-reset requests, per address
+    forgot_by_email = auth.Throttle(limit=3, window_seconds=3600)           # ... and per account, so one person cannot be flooded with reset mail
+    reset_misses = auth.Throttle(limit=10, window_seconds=15 * 60)          # wrong or used reset links, per address
+    unsubscribe_misses = auth.Throttle(limit=30, window_seconds=15 * 60)    # wrong unsubscribe links, per address
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -155,12 +174,16 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
             app.state.store = Store(str(settings.data_dir / "boatconnect.db"))
             app.state.cookie_secure = settings.cookie_secure
             app.state.admin_emails = settings.admin_emails
+            app.state.public_url = settings.public_url
+            app.state.mailer = SmtpMailer(settings.mail_host, settings.mail_port, settings.mail_from, settings.mail_reply_to or None, starttls=settings.mail_starttls) if settings.mail_host else NoMailer()
         yield
 
     app = FastAPI(title="boatconnect", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
     app.state.cookie_secure = cookie_secure
     app.state.admin_emails = tuple(e.lower() for e in admin_emails)
+    app.state.mailer = mailer or NoMailer()
+    app.state.public_url = public_url.rstrip("/")
 
     @app.middleware("http")
     async def protect(request: Request, call_next):
@@ -214,7 +237,12 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         response.set_cookie(COOKIE, token, max_age=int(auth.LOGIN_LIFETIME_SECONDS), httponly=True, samesite="strict", secure=app.state.cookie_secure, path="/")
 
     def person(user: Dict[str, Any]) -> Dict[str, Any]:
-        return {"id": user["id"], "email": user["email"], "name": user["name"], "is_admin": is_admin(user)}
+        return {"id": user["id"], "email": user["email"], "name": user["name"], "is_admin": is_admin(user), "email_trips": bool(user.get("email_trips", 1))}
+
+    def queue(background: BackgroundTasks, addresses: Any, mail: Mail) -> None:
+        """Send after the response has gone, so a slow mail server never holds a request up; nothing happens when no relay is configured."""
+        if app.state.mailer.enabled and addresses:
+            background.add_task(app.state.mailer.send, list(addresses), mail)
 
     # ---- accounts ----------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -269,6 +297,60 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     async def me(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
         return person(user)
 
+    @app.patch("/api/auth/preferences", dependencies=[Depends(same_origin)])
+    async def preferences(body: PreferencesIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+        await app.state.store.run(app.state.store.set_email_trips, user["id"], body.email_trips)
+        return {**person(user), "email_trips": body.email_trips}
+
+    @app.post("/api/unsubscribe/{token}")
+    async def unsubscribe(token: str, request: Request) -> Dict[str, bool]:
+        """The one-click link in a trip email (a mail program may post to it without anyone logging in): the secret in the address says whose emails to stop."""
+        where = address(request)
+        if unsubscribe_misses.blocked(where):
+            raise HTTPException(status_code=429, detail="too many wrong links", headers={"Retry-After": str(unsubscribe_misses.retry_after(where))})
+        if not await app.state.store.run(app.state.store.unsubscribe_trips, token):
+            unsubscribe_misses.add(where)
+            raise HTTPException(status_code=404, detail="that link is not valid")
+        return {"ok": True}
+
+    @app.post("/api/auth/forgot", status_code=202, dependencies=[Depends(same_origin)])
+    async def forgot_password(body: ForgotIn, request: Request, background: BackgroundTasks) -> Dict[str, bool]:
+        """Mail a link to choose a new password. The answer is the same whether or not the address has an account, so this cannot be used to find out who is registered."""
+        if not app.state.mailer.enabled:
+            raise HTTPException(status_code=503, detail="email is not set up here, so passwords cannot be reset by email; ask the administrator")
+        where = address(request)
+        limit(forgot_by_address, where, "password-reset requests from here")
+        forgot_by_address.add(where)
+        try:
+            email = auth.normalize_email(body.email)
+        except auth.AuthError:
+            return {"ok": True}
+        if forgot_by_email.blocked(email):
+            return {"ok": True}                                                    # quietly: do not tell a stranger that this address was asked about already
+        forgot_by_email.add(email)
+        account = await app.state.store.run(app.state.store.user_by_email, email)
+        if account:
+            token, hashed = auth.new_token()
+            await app.state.store.run(app.state.store.create_password_reset, account["id"], hashed, 3600)
+            queue(background, [account["email"]], emails.password_reset(account["name"], f"{app.state.public_url}/reset?token={token}"))
+        return {"ok": True}
+
+    @app.post("/api/auth/reset", dependencies=[Depends(same_origin)])
+    async def reset_password(body: ResetIn, request: Request) -> Dict[str, bool]:
+        where = address(request)
+        limit(reset_misses, where, "wrong reset links")
+        try:
+            auth.check_password(body.password)
+        except auth.AuthError as error:
+            raise HTTPException(status_code=422, detail=str(error))
+        new_hash = await asyncio.to_thread(auth.hash_password, body.password)
+        try:
+            await app.state.store.run(app.state.store.reset_password, auth.hash_token(body.token), new_hash)
+        except StoreError as error:
+            reset_misses.add(where)
+            raise HTTPException(status_code=409, detail=str(error))
+        return {"ok": True}
+
     # ---- boats -------------------------------------------------------------------------------------------------------------------------------------------------
 
     async def describe(boat: Dict[str, Any], user: Optional[Dict[str, Any]], roles: Optional[Dict[str, str]] = None, waiting: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -306,10 +388,11 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         return [await describe(b, user, roles or {}, waiting or {}) for b in boats]
 
     @app.post("/api/boats", status_code=201, dependencies=[Depends(same_origin)])
-    async def add_boat(body: BoatIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
+    async def add_boat(body: BoatIn, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
         limit(boats_added, user["id"], "boats")
         boat_id = await db(app.state.store.create_boat, user["id"], body.name, body.home_port, body.description, body.timezone, body.share_percent)
         boats_added.add(user["id"])
+        queue(background, [a for a in app.state.admin_emails if a != user["email"]], emails.boat_waiting(body.name, user["name"], app.state.public_url))
         return {"id": boat_id}
 
     @app.get("/api/boats/{boat_id}")
@@ -382,11 +465,16 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         return Response(content=photo["data"], media_type="image/jpeg", headers=headers)
 
     @app.post("/api/boats/{boat_id}/join-requests", status_code=201, dependencies=[Depends(same_origin)])
-    async def join(boat_id: str, body: JoinIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
+    async def join(boat_id: str, body: JoinIn, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
         limit(requests_made, user["id"], "requests")
-        await visible_boat(boat_id, user)
+        boat = await visible_boat(boat_id, user)
         request_id = await db(app.state.store.request_join, boat_id, user["id"], body.role, body.share_percent, body.message.strip())
         requests_made.add(user["id"])
+        if body.role == "owner":
+            deciders = list(app.state.admin_emails)                                  # a new owner is the administrator's to approve
+        else:
+            deciders = [o["email"] for o in await app.state.store.run(app.state.store.boat_owners, boat_id)]       # a new crew member, the owners'
+        queue(background, [a for a in deciders if a != user["email"]], emails.join_request(user["name"], boat["name"], body.role, body.share_percent, body.message.strip(), app.state.public_url))
         return {"id": request_id}
 
     @app.delete("/api/boats/{boat_id}/members/{member_id}", dependencies=[Depends(same_origin)])
@@ -416,14 +504,18 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         return {"boats": boats, "requests": requests}
 
     @app.post("/api/boats/{boat_id}/decision", dependencies=[Depends(same_origin)])
-    async def decide_boat(boat_id: str, body: Decision, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+    async def decide_boat(boat_id: str, body: Decision, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
         if not is_admin(user):
             raise HTTPException(status_code=403, detail="only the administrator approves boats")
         await db(app.state.store.decide_boat, boat_id, body.approve)
+        boat = await app.state.store.run(app.state.store.get_boat, boat_id)
+        maker = await app.state.store.run(app.state.store.user_by_id, boat["created_by"]) if boat else None
+        if maker and maker["id"] != user["id"]:
+            queue(background, [maker["email"]], emails.boat_decision(boat["name"], body.approve, app.state.public_url, boat_id))
         return {"ok": True}
 
     @app.post("/api/join-requests/{request_id}/decision", dependencies=[Depends(same_origin)])
-    async def decide_request(request_id: str, body: Decision, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+    async def decide_request(request_id: str, body: Decision, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
         store = app.state.store
         req = await store.run(store.get_request, request_id)
         if not req:
@@ -435,6 +527,9 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         if not allowed:
             raise HTTPException(status_code=403, detail="you may not decide this request")
         await db(store.decide_request, request_id, user["id"], body.approve)
+        asker = await store.run(store.user_by_id, req["user_id"])
+        if asker and asker["id"] != user["id"]:
+            queue(background, [asker["email"]], emails.request_decision(req["boat_name"], req["role"], body.approve, app.state.public_url, req["boat_id"]))
         return {"ok": True}
 
     # ---- the calendar ------------------------------------------------------------------------------------------------------------------------------------------
@@ -463,14 +558,26 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         return [booking_json(b, user, role) for b in rows]
 
     @app.post("/api/boats/{boat_id}/bookings", status_code=201, dependencies=[Depends(same_origin)])
-    async def book(boat_id: str, body: BookingIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
+    async def book(boat_id: str, body: BookingIn, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, str]:
         role = await member_of(boat_id, user)
         if role != "owner":
             raise HTTPException(status_code=403, detail="only an owner books the boat; crew sign on to an owner's trip")
         limit(bookings_made, user["id"], "bookings")
         booking_id = await db(app.state.store.create_booking, boat_id, user["id"], body.title, body.start, body.end, body.capacity, body.notes.strip())
         bookings_made.add(user["id"])
+        await trip_mail(background, "booked", user, boat_id, body.title, body.start, body.end)
         return {"id": booking_id}
+
+    async def trip_mail(background: BackgroundTasks, kind: str, actor: Dict[str, Any], boat_id: str, title: str, start: float, end: float) -> None:
+        """Tell the other members who want to hear about trips that this one was booked, changed or cancelled; each gets a mail with their own unsubscribe link."""
+        if not app.state.mailer.enabled:
+            return
+        store, base = app.state.store, app.state.public_url
+        boat = await store.run(store.get_boat, boat_id)
+        span = emails.when(start, end, boat["timezone"])
+        for r in await store.run(store.trip_recipients, boat_id, actor["id"]):
+            queue(background, [r["email"]], emails.trip_notice(kind, actor["name"], boat["name"], title, span, base, boat_id,
+                                                               f"{base}/api/unsubscribe/{r['mail_token']}", f"{base}/unsubscribe?token={r['mail_token']}"))
 
     async def booking_for(booking_id: str, user: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         booking = await app.state.store.run(app.state.store.get_booking, booking_id)
@@ -479,19 +586,22 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         return booking, await member_of(booking["boat_id"], user)
 
     @app.patch("/api/bookings/{booking_id}", dependencies=[Depends(same_origin)])
-    async def change_booking(booking_id: str, body: BookingIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+    async def change_booking(booking_id: str, body: BookingIn, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
         booking, role = await booking_for(booking_id, user)
         if booking["created_by"] != user["id"] and role not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="only the person who made it, or an owner, may change this booking")
         await db(app.state.store.update_booking, booking_id, body.title, body.start, body.end, body.capacity, body.notes.strip())
+        if (booking["title"], booking["start_utc"], booking["end_utc"]) != (body.title, body.start, body.end):            # a change to the notes or the limit alone is not worth an email
+            await trip_mail(background, "changed", user, booking["boat_id"], body.title, body.start, body.end)
         return {"ok": True}
 
     @app.delete("/api/bookings/{booking_id}", dependencies=[Depends(same_origin)])
-    async def cancel_booking(booking_id: str, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+    async def cancel_booking(booking_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
         booking, role = await booking_for(booking_id, user)
         if booking["created_by"] != user["id"] and role not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="only the person who made it, or an owner, may cancel this booking")
         await app.state.store.run(app.state.store.delete_booking, booking_id)
+        await trip_mail(background, "cancelled", user, booking["boat_id"], booking["title"], booking["start_utc"], booking["end_utc"])
         return {"ok": True}
 
     @app.post("/api/bookings/{booking_id}/signon", dependencies=[Depends(same_origin)])

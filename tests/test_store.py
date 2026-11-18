@@ -5,6 +5,20 @@ from boatconnect.store import Store, StoreError
 from .conftest import DAY, HOUR, T0
 
 
+def downgrade(path, version):
+    """Turn a database made by the current code back into the one an older version of the program would have left, by undoing each later migration."""
+    import sqlite3
+    undo = {1: ["DROP TABLE share_history"],
+            2: ["DROP TABLE calendar_feeds", "ALTER TABLE bookings DROP COLUMN updated_at"],
+            3: ["DROP TABLE boat_photos"],
+            4: ["DROP TABLE password_resets", "ALTER TABLE users DROP COLUMN email_trips", "ALTER TABLE users DROP COLUMN mail_token"]}
+    with sqlite3.connect(path) as db:
+        for step in range(4, version - 1, -1):
+            for statement in undo[step]:
+                db.execute(statement)
+        db.execute(f"PRAGMA user_version = {version}")
+
+
 def user(store, n):
     return store.create_user(f"u{n}@example.com", f"User {n}", "hash")
 
@@ -232,17 +246,11 @@ def test_the_share_history_records_joining_changing_and_leaving(store):
 
 
 def test_a_database_from_before_the_share_history_is_upgraded(tmp_path):
-    import sqlite3
     path = str(tmp_path / "old.db")
     first = Store(path)
     owner = user(first, 1)
     b = boat(first, owner, 70)
-    with sqlite3.connect(path) as db:                                                         # turn it back into a version-1 database
-        db.execute("DROP TABLE share_history")
-        db.execute("DROP TABLE calendar_feeds")
-        db.execute("DROP TABLE boat_photos")
-        db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
-        db.execute("PRAGMA user_version = 1")
+    downgrade(path, 1)                                                    # as an older version of the program left it
     upgraded = Store(path)
     assert [(h["name"], h["old_share"], h["new_share"]) for h in upgraded.share_history(b)] == [("User 1", None, 70)]
     upgraded.set_share(b, owner, 65)                                                          # and it works as a new one
@@ -310,18 +318,13 @@ def test_a_trips_last_change_moves_when_it_or_its_crew_change(store):
 
 
 def test_a_database_from_before_the_calendar_feed_is_upgraded(tmp_path):
-    import sqlite3
     path = str(tmp_path / "v2.db")
     first = Store(path)
     owner = user(first, 1)
     b = boat(first, owner)
     trip = first.create_booking(b, owner, "Old trip", T0, T0 + HOUR, None, "")
     created = first.get_booking(trip)["created_at"]
-    with sqlite3.connect(path) as db:                                                     # turn it back into a version-2 database
-        db.execute("DROP TABLE calendar_feeds")
-        db.execute("DROP TABLE boat_photos")
-        db.execute("ALTER TABLE bookings DROP COLUMN updated_at")
-        db.execute("PRAGMA user_version = 2")
+    downgrade(path, 2)                                                    # as an older version of the program left it
     upgraded = Store(path)
     assert upgraded.get_booking(trip)["updated_at"] == created                            # an existing trip's last change starts as its creation
     token = upgraded.feed_token(owner)
@@ -356,15 +359,72 @@ def test_the_boat_list_says_which_boats_have_a_photo(store):
 
 
 def test_a_database_from_before_boat_photos_is_upgraded(tmp_path):
-    import sqlite3
     path = str(tmp_path / "v3.db")
     first = Store(path)
     owner = user(first, 1)
     b = boat(first, owner)
-    with sqlite3.connect(path) as db:                                                     # turn it back into a version-3 database
-        db.execute("DROP TABLE boat_photos")
-        db.execute("PRAGMA user_version = 3")
+    downgrade(path, 3)                                                    # as an older version of the program left it
     upgraded = Store(path)
     assert upgraded.get_boat(b)["photo_updated"] is None
     upgraded.set_photo(b, b"x")
     assert upgraded.get_photo(b)["data"] == b"x"
+
+
+def test_a_database_from_before_mail_is_upgraded(tmp_path):
+    path = str(tmp_path / "v4.db")
+    first = Store(path)
+    a, b2 = user(first, 1), user(first, 2)
+    downgrade(path, 4)
+    upgraded = Store(path)
+    for who in (a, b2):
+        row = upgraded.user_by_id(who)
+        assert row["email_trips"] == 1 and len(row["mail_token"]) >= 30                    # everyone wants trip emails to begin with, and has a link of their own
+    assert upgraded.user_by_id(a)["mail_token"] != upgraded.user_by_id(b2)["mail_token"]
+    upgraded.create_password_reset(a, "hash", 3600)                                        # and the new table works
+
+
+# ---- mail preferences and forgotten passwords ------------------------------------------------------------------------------------------------------------
+
+def test_trip_emails_go_to_members_who_want_them_except_the_one_who_acted(store):
+    sam, ann, bob, cat = user(store, 1), user(store, 2), user(store, 3), user(store, 4)
+    b = boat(store, sam)
+    store.decide_boat(b, True)
+    for who in (ann, bob):
+        store.decide_request(store.request_join(b, who, "crew", None, ""), sam, True)
+    store.set_email_trips(bob, False)
+    assert [r["name"] for r in store.trip_recipients(b, exclude_user_id=sam)] == ["User 2"]          # Bob opted out, Sam acted, Cat is not a member
+    assert {r["name"] for r in store.trip_recipients(b, exclude_user_id=ann)} == {"User 1"}
+    assert all(len(r["mail_token"]) >= 30 for r in store.trip_recipients(b, exclude_user_id=ann))
+
+
+def test_the_unsubscribe_link_stops_trip_emails_for_its_holder_only(store):
+    sam, ann = user(store, 1), user(store, 2)
+    token = store.user_by_id(sam)["mail_token"]
+    assert store.unsubscribe_trips(token) is True
+    assert store.user_by_id(sam)["email_trips"] == 0 and store.user_by_id(ann)["email_trips"] == 1
+    assert store.unsubscribe_trips("not a token") is False and store.unsubscribe_trips("") is False
+
+
+def test_a_reset_link_works_once_sets_the_password_and_ends_every_login(store):
+    sam = user(store, 1)
+    store.create_login(sam, "session-1", 3600)
+    store.create_password_reset(sam, "link-1", 3600)
+    store.create_password_reset(sam, "link-2", 3600)                                       # a second request: both are outstanding
+    assert store.user_for_login("session-1")["id"] == sam
+    assert store.reset_password("link-1", "new-hash") == sam
+    assert store.user_by_email("u1@example.com")["password_hash"] == "new-hash"
+    assert store.user_for_login("session-1") is None                                        # whoever was logged in with the old password is out
+    with pytest.raises(StoreError, match="expired or was already used"):
+        store.reset_password("link-1", "again")                                             # used
+    with pytest.raises(StoreError, match="expired or was already used"):
+        store.reset_password("link-2", "again")                                             # cancelled by the first
+
+
+def test_an_expired_or_unknown_reset_link_is_refused(store):
+    sam = user(store, 1)
+    store.create_password_reset(sam, "old-link", -10)
+    with pytest.raises(StoreError, match="expired or was already used"):
+        store.reset_password("old-link", "x")
+    with pytest.raises(StoreError, match="expired or was already used"):
+        store.reset_password("never-made", "x")
+    assert store.user_by_email("u1@example.com")["password_hash"] == "hash"
