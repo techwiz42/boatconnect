@@ -115,7 +115,7 @@ export function TripDetail({ trip, timezone, me, onClose, onChanged, onEdit }: {
             </span>
             {a.user_id !== trip.created_by && (a.user_id === me.id || trip.can_edit) && (
               <button type="button" className="link-button" disabled={busy} onClick={() => act(() => api.signOff(trip.id, a.user_id))}>
-                {a.user_id === me.id ? "Sign off" : "Remove"}
+                {a.user_id === me.id ? "Sign off" : "Take off this trip"}
               </button>
             )}
           </li>
