@@ -42,7 +42,7 @@ class FakeSmtp:
     refuse = set()
 
     def __init__(self, host, port, timeout=None):
-        self.host, self.port, self.timeout, self.started, self.messages = host, port, timeout, False, []
+        self.host, self.port, self.timeout, self.started, self.messages, self.logged_in = host, port, timeout, False, [], None
         FakeSmtp.instances.append(self)
 
     def __enter__(self):
@@ -53,6 +53,10 @@ class FakeSmtp:
 
     def starttls(self, context=None):
         self.started = True
+
+    def login(self, user, password):
+        assert self.started, "must not log in before the connection is encrypted"
+        self.logged_in = (user, password)
 
     def send_message(self, message):
         if message["To"] in FakeSmtp.refuse:
@@ -272,3 +276,13 @@ def test_requests_from_one_address_are_limited(app):
 def test_reset_requests_from_another_site_are_refused(app, make_person):
     make_person("sam@example.com", "Sam")
     assert TestClient(app).post("/api/auth/forgot", json={"email": "sam@example.com"}, headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def test_a_mailbox_login_is_used_only_after_encryption(smtp):
+    asyncio.run(SmtpMailer("smtp.gmail.com", 587, "noreply@x.org", username="noreply@x.org", password="app pass").send(["a@example.com"], SAMPLE))
+    assert smtp.instances[0].logged_in == ("noreply@x.org", "app pass")
+
+
+def test_a_relay_without_a_login_is_not_asked_to_log_in(smtp):
+    asyncio.run(SmtpMailer("smtp-relay.gmail.com", 587, "noreply@x.org").send(["a@example.com"], SAMPLE))
+    assert smtp.instances[0].logged_in is None

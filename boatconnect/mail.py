@@ -1,4 +1,4 @@
-"""Sending mail through an SMTP relay (Google Workspace's, which trusts this machine by its fixed address, so there is no password to keep).
+"""Sending mail through an SMTP server: either a relay that trusts this machine by its address (no login), or a mailbox with an app password (Gmail's smtp.gmail.com).
 
 Sending is best-effort and never holds up a request: a message that cannot be delivered is logged (the address, never the text) and dropped. With no relay configured nothing is
 sent, and the features that depend on mail say so. Tests pass in a fake that records messages instead.
@@ -69,13 +69,17 @@ class NoMailer(Mailer):
 class SmtpMailer(Mailer):
     enabled = True
 
-    def __init__(self, host: str, port: int, sender: str, reply_to: Optional[str] = None, timeout: float = 20.0, starttls: bool = True) -> None:
+    def __init__(self, host: str, port: int, sender: str, reply_to: Optional[str] = None, timeout: float = 20.0, starttls: bool = True,
+                 username: str = "", password: str = "") -> None:
         self.host, self.port, self.sender, self.reply_to, self.timeout, self.starttls = host, port, sender, reply_to, timeout, starttls
+        self.username, self.password = username, password
 
     def _deliver(self, recipients: List[str], mail: Mail) -> None:
         with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
             if self.starttls:
                 smtp.starttls(context=ssl.create_default_context())
+            if self.username:                                                          # only ever after the connection is encrypted
+                smtp.login(self.username, self.password)
             for to in recipients:                                                      # one message each, so nobody sees anyone else's address
                 try:
                     smtp.send_message(build_message(self.sender, self.reply_to, to, mail))

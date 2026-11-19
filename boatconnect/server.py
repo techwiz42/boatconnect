@@ -175,7 +175,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
             app.state.cookie_secure = settings.cookie_secure
             app.state.admin_emails = settings.admin_emails
             app.state.public_url = settings.public_url
-            app.state.mailer = SmtpMailer(settings.mail_host, settings.mail_port, settings.mail_from, settings.mail_reply_to or None, starttls=settings.mail_starttls) if settings.mail_host else NoMailer()
+            app.state.mailer = SmtpMailer(settings.mail_host, settings.mail_port, settings.mail_from, settings.mail_reply_to or None, starttls=settings.mail_starttls, username=settings.mail_user, password=settings.mail_password) if settings.mail_host else NoMailer()
         yield
 
     app = FastAPI(title="boatconnect", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

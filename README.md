@@ -36,7 +36,7 @@ Open http://127.0.0.1:8001. For front-end work, `cd web && npm run dev` serves o
 
 ## Email
 
-Sent through an SMTP relay (in production Google Workspace's `smtp-relay.gmail.com`, which trusts the VM by its fixed address, so no password is kept). With `MAIL_HOST` empty nothing
+Sent through an SMTP relay (in production Google Workspace's `smtp-relay.gmail.com`, which trusts the VM by its fixed address, so no password is kept), or `smtp.gmail.com` with `MAIL_USER` and an app `MAIL_PASSWORD` (the From address must then be that mailbox or one of its aliases). With `MAIL_HOST` empty nothing
 is sent and the features that need mail say so.
 
 - Owners are told of requests to join; the administrator of new boats and owner requests; people of the decision on their request or boat.
