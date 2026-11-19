@@ -79,7 +79,9 @@ class SmtpMailer(Mailer):
             if self.starttls:
                 smtp.starttls(context=ssl.create_default_context())
             if self.username:                                                          # only ever after the connection is encrypted
-                smtp.login(self.username, self.password)
+                smtp.ehlo_or_helo_if_needed()
+                smtp.user, smtp.password = self.username, self.password
+                smtp.auth("LOGIN", smtp.auth_login, initial_response_ok=False)         # Gmail hangs up on the PLAIN that smtplib tries first
             for to in recipients:                                                      # one message each, so nobody sees anyone else's address
                 try:
                     smtp.send_message(build_message(self.sender, self.reply_to, to, mail))

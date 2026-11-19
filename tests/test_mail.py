@@ -54,9 +54,16 @@ class FakeSmtp:
     def starttls(self, context=None):
         self.started = True
 
-    def login(self, user, password):
+    def ehlo_or_helo_if_needed(self):
+        pass
+
+    def auth_login(self, challenge=None):
+        pass
+
+    def auth(self, mechanism, authobject, *, initial_response_ok=True):
         assert self.started, "must not log in before the connection is encrypted"
-        self.logged_in = (user, password)
+        assert mechanism == "LOGIN" and initial_response_ok is False
+        self.logged_in = (self.user, self.password)
 
     def send_message(self, message):
         if message["To"] in FakeSmtp.refuse:
