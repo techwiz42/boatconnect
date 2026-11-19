@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addMonths, dayOf, formatTime, formatWhen, fromLocalInput, gridRange, hiddenPerDay, layoutWeek, monthGrid, toLocalInput, zonedParts, zonedToEpoch } from "./calendarMath";
+import { addMonths, dayOf, formatTime, formatWhen, fromLocalInput, gridRange, hiddenPerDay, layoutWeek, monthGrid, toLocalInput, tripsOnDay, zonedParts, zonedToEpoch } from "./calendarMath";
 
 const LA = "America/Los_Angeles";
 const trip = (id: string, start: number, end: number) => ({ id, start, end });
@@ -125,5 +125,16 @@ describe("laying trips out as bars", () => {
     expect(out.map((s) => s.lane)).toEqual([0, 1, 2, 3]);
     expect(hiddenPerDay(out, 3)).toEqual([0, 0, 1, 0, 0, 0, 0]);
     expect(hiddenPerDay(out, 4)).toEqual([0, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe("tripsOnDay", () => {
+  it("lists the trips touching a day, including multi-day trips, and not one that ends at midnight", () => {
+    const sail = trip("a", at(2026, 7, 4, 9), at(2026, 7, 4, 17));
+    const cruise = trip("b", at(2026, 7, 3, 18), at(2026, 7, 5, 10));
+    const ends = trip("c", at(2026, 7, 3, 9), at(2026, 7, 4, 0));
+    expect(tripsOnDay([sail, cruise, ends], "2026-07-04", LA).map((x) => x.id)).toEqual(["b", "a"]);
+    expect(tripsOnDay([sail, cruise, ends], "2026-07-03", LA).map((x) => x.id)).toEqual(["c", "b"]);
+    expect(tripsOnDay([sail, cruise, ends], "2026-07-06", LA)).toEqual([]);
   });
 });

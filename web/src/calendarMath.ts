@@ -152,6 +152,11 @@ export function hiddenPerDay<T extends TripLike>(segments: Segment<T>[], visible
   return counts;
 }
 
+/** The trips that touch a calendar day (in the boat's zone), earliest first. A trip ending exactly at midnight does not touch the next day. */
+export function tripsOnDay<T extends TripLike>(trips: T[], day: string, timeZone: string): T[] {
+  return trips.filter((t) => dayOf(t.start, timeZone) <= day && dayOf(t.end - 1, timeZone) >= day).sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
+}
+
 export function formatTime(epochSeconds: number, timeZone: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" }).format(new Date(epochSeconds * 1000)).replace(/\s*AM$/, "a").replace(/\s*PM$/, "p");
 }

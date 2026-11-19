@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError, Boat, Me, Trip } from "./api";
-import { addMonths, dayOf, formatTime, formatWhen, gridRange, hiddenPerDay, layoutWeek, monthGrid, monthTitle, WEEKDAYS } from "./calendarMath";
+import { addMonths, dayOf, formatTime, formatWhen, gridRange, hiddenPerDay, layoutWeek, monthGrid, monthTitle, tripsOnDay, WEEKDAYS } from "./calendarMath";
+import { DayDialog } from "./DayDialog";
 import { FeedDialog } from "./FeedDialog";
 import { TripDetail, TripForm } from "./TripDialogs";
 
@@ -22,6 +23,7 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null); // the id of the trip being looked at
   const [form, setForm] = useState<{ trip?: Trip; day?: string } | null>(null);
+  const [dayOpen, setDayOpen] = useState<string | null>(null); // a day whose trips and crew are being looked at
   const [feedOpen, setFeedOpen] = useState(false);
   const isOwner = boat.my_role === "owner";
 
@@ -95,21 +97,24 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
           const rows = shown + (hidden.some((n) => n > 0) ? 1 : 0);
           return (
             <div className="week" key={week[0]!.key} role="row" style={{ gridTemplateRows: `1.8rem repeat(${rows}, 1.5rem) minmax(0.3rem, 1fr)` }}>
-              {week.map((d, c) => (
+              {week.map((d, c) => {
+                const busy = tripsOnDay(trips, d.key, timezone).length > 0;
+                return (
                 <button
                   type="button"
                   key={d.key}
                   role="gridcell"
                   className={`day${d.inMonth ? "" : " outside"}${d.key === today ? " today" : ""}`}
                   style={{ gridColumn: c + 1, gridRow: `1 / span ${rows + 2}` }}
-                  disabled={!isOwner}
-                  onClick={() => setForm({ day: d.key })}
-                  aria-label={`${d.key}${isOwner ? ", add a trip" : ""}`}
-                  title={isOwner ? "Add a trip on this day" : undefined}
+                  disabled={!busy && !isOwner}
+                  onClick={() => (busy ? setDayOpen(d.key) : setForm({ day: d.key }))}
+                  aria-label={busy ? `${d.key}, who is aboard` : `${d.key}${isOwner ? ", add a trip" : ""}`}
+                  title={busy ? "See who is aboard this day" : isOwner ? "Add a trip on this day" : undefined}
                 >
                   <span className="num">{d.day === 1 ? `${new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" }).format(new Date(Date.UTC(d.year, d.month - 1, 1)))} 1` : d.day}</span>
                 </button>
-              ))}
+                );
+              })}
               {segments
                 .filter((s) => s.lane < VISIBLE_LANES)
                 .map((s) => {
@@ -156,12 +161,27 @@ export function Calendar({ boat, me }: { boat: Boat; me: Me }) {
                   {t.created_by_name} · {t.aboard.length}
                   {t.capacity !== null ? `/${t.capacity}` : ""} aboard{t.i_am_aboard ? " · you are aboard" : ""}
                 </span>
+                {t.aboard.length > 0 && <span className="crew-line">Aboard: {t.aboard.map((a) => a.name).join(", ")}</span>}
               </button>
             </li>
           ))}
         </ul>
       )}
 
+      {dayOpen && !current && !form && (
+        <DayDialog
+          day={dayOpen}
+          trips={tripsOnDay(trips, dayOpen, timezone)}
+          timezone={timezone}
+          canAdd={isOwner}
+          onOpenTrip={(id) => setOpen(id)}
+          onAdd={() => {
+            setForm({ day: dayOpen });
+            setDayOpen(null);
+          }}
+          onClose={() => setDayOpen(null)}
+        />
+      )}
       {current && !form && (
         <TripDetail
           trip={current}
