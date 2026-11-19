@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { Confirm } from "./Confirm";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { api, ApiError, Boat, photoUrl, Role } from "./api";
 import { useAuth } from "./auth";
@@ -80,6 +81,7 @@ export function BoatPage() {
   const [actionError, setActionError] = useState("");
   const [editing, setEditing] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [asking, setAsking] = useState<{ userId: string; text: string; yes: string } | null>(null); // a removal waiting for the owner to confirm it
 
   const load = useCallback(() => {
     api.boat(id).then(
@@ -93,9 +95,10 @@ export function BoatPage() {
 
   useEffect(load, [load, me?.id]);
 
-  async function remove(userId: string, text: string) {
-    if (!boat || !window.confirm(text)) return;
+  async function remove(userId: string) {
+    if (!boat) return;
     setActionError("");
+    setAsking(null);
     try {
       await api.removeMember(boat.id, userId);
       load();
@@ -171,6 +174,7 @@ export function BoatPage() {
           <Calendar boat={boat} me={me} />
           <aside className="card members">
             <h2>Members</h2>
+            {asking && <Confirm text={asking.text} yes={asking.yes} onYes={() => void remove(asking.userId)} onNo={() => setAsking(null)} />}
             {boat.members?.length ? (
               <ul className="member-list">
                 {boat.members.map((m) => (
@@ -189,13 +193,13 @@ export function BoatPage() {
                             Change share
                           </button>
                         )}
-                        <button type="button" className="link-button" onClick={() => remove(m.user_id, "Leave this boat? Your trips and sign-ons are removed.")}>
+                        <button type="button" className="link-button" onClick={() => setAsking({ userId: m.user_id, text: "Leave this boat? Your trips and sign-ons are removed.", yes: "Leave the boat" })}>
                           Leave
                         </button>
                       </span>
                     ) : (
                       boat.my_role === "owner" && m.role === "crew" && (
-                        <button type="button" className="link-button" onClick={() => remove(m.user_id, `Remove ${m.name} from the boat? Their trips and sign-ons are removed.`)}>
+                        <button type="button" className="link-button" onClick={() => setAsking({ userId: m.user_id, text: `Remove ${m.name} from the boat? Their trips and sign-ons are removed.`, yes: `Remove ${m.name}` })}>
                           Remove
                         </button>
                       )

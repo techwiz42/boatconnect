@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "./api";
+import { Confirm } from "./Confirm";
 import { Modal } from "./Modal";
 
 /** The person's private calendar address: add it to Google, Apple or Outlook calendar once, and every trip of every boat they belong to shows there and stays current. */
@@ -7,6 +8,7 @@ export function FeedDialog({ onClose }: { onClose: () => void }) {
   const [path, setPath] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [asking, setAsking] = useState(false); // making a new link waits for a yes
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -28,7 +30,7 @@ export function FeedDialog({ onClose }: { onClose: () => void }) {
   }
 
   async function reset() {
-    if (!window.confirm("Make a new link? The old one stops working, so any calendar that uses it must be given the new one.")) return;
+    setAsking(false);
     setBusy(true);
     setError("");
     try {
@@ -71,8 +73,9 @@ export function FeedDialog({ onClose }: { onClose: () => void }) {
           {error}
         </p>
       )}
+      {asking && <Confirm text="Make a new link? The old one stops working, so any calendar that uses it must be given the new one." yes="Make a new link" busy={busy} onYes={() => void reset()} onNo={() => setAsking(false)} />}
       <div className="actions">
-        <button type="button" className="button secondary" onClick={reset} disabled={busy || !path}>
+        <button type="button" className="button secondary" onClick={() => setAsking(true)} disabled={busy || !path}>
           Make a new link
         </button>
         <button type="button" className="button secondary" onClick={onClose}>

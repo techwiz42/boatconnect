@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { api, ApiError, Me, Trip } from "./api";
 import { formatWhen, fromLocalInput, toLocalInput } from "./calendarMath";
+import { Confirm } from "./Confirm";
 import { Modal } from "./Modal";
 
 const hhmm = (h: number) => `${String(h).padStart(2, "0")}:00`;
@@ -82,6 +83,7 @@ export function TripForm({ boatId, timezone, trip, day, onClose, onSaved }: { bo
 export function TripDetail({ trip, timezone, me, onClose, onChanged, onEdit }: { trip: Trip; timezone: string; me: Me; onClose: () => void; onChanged: () => void; onEdit: () => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const full = trip.capacity !== null && trip.aboard.length >= trip.capacity;
 
   async function act(job: () => Promise<unknown>, closeAfter = false) {
@@ -121,6 +123,7 @@ export function TripDetail({ trip, timezone, me, onClose, onChanged, onEdit }: {
           </li>
         ))}
       </ul>
+      {cancelling && <Confirm text="Cancel this trip? Everyone signed on loses it." yes="Cancel the trip" busy={busy} onYes={() => act(() => api.cancelTrip(trip.id), true)} onNo={() => setCancelling(false)} />}
       {error && (
         <p className="error" role="alert">
           {error}
@@ -137,12 +140,7 @@ export function TripDetail({ trip, timezone, me, onClose, onChanged, onEdit }: {
             <button type="button" className="button secondary" onClick={onEdit}>
               Change
             </button>
-            <button
-              type="button"
-              className="button danger"
-              disabled={busy}
-              onClick={() => window.confirm("Cancel this trip? Everyone signed on loses it.") && act(() => api.cancelTrip(trip.id), true)}
-            >
+            <button type="button" className="button danger" disabled={busy} onClick={() => setCancelling(true)}>
               Cancel trip
             </button>
           </>
