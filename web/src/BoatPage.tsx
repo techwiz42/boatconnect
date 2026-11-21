@@ -1,10 +1,11 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Confirm } from "./Confirm";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, Boat, photoUrl, Role } from "./api";
 import { useAuth } from "./auth";
 import { Calendar } from "./Calendar";
 import { EditBoat } from "./EditBoat";
+import { MessageDialog } from "./MessageDialog";
 import { ShareDialog } from "./ShareDialog";
 import { standing } from "./Landing";
 
@@ -75,12 +76,16 @@ function JoinForm({ boat, onSent }: { boat: Boat; onSent: () => void }) {
 export function BoatPage() {
   const { id = "" } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const { me } = useAuth();
   const [boat, setBoat] = useState<Boat | null>(null);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
   const [editing, setEditing] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [messaging, setMessaging] = useState(false);
+  const [deleting, setDeleting] = useState(false); // the owner or administrator is being asked to confirm deleting the boat
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [asking, setAsking] = useState<{ userId: string; text: string; yes: string } | null>(null); // a removal waiting for the owner to confirm it
 
   const load = useCallback(() => {
@@ -107,13 +112,28 @@ export function BoatPage() {
     }
   }
 
+  async function deleteBoat() {
+    if (!boat) return;
+    setDeleteBusy(true);
+    setActionError("");
+    try {
+      await api.deleteBoat(boat.id);
+      navigate("/", { replace: true });
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "something went wrong");
+      setDeleteBusy(false);
+      setDeleting(false);
+    }
+  }
+
   if (error) return <section className="card"><p className="error">{error}</p><Link to="/">Back to the boats</Link></section>;
   if (!boat) return <p className="hint">Loading…</p>;
 
   const s = standing(boat);
   const member = boat.my_role !== null;
   const approved = boat.status === "approved";
-  const canEdit = boat.my_role === "owner";
+  const canEdit = boat.my_role === "owner" || !!me?.is_admin;
+  const canDelete = !!me?.is_admin || (boat.my_role === "owner" && boat.owner_count === 1); // one of several owners cannot wipe the boat of the others
 
   return (
     <>
@@ -135,7 +155,27 @@ export function BoatPage() {
               Edit boat
             </button>
           )}
+          {canDelete && (
+            <button type="button" className="button danger" onClick={() => setDeleting(true)}>
+              Delete boat
+            </button>
+          )}
         </div>
+        {deleting && (
+          <Confirm
+            text={`Delete ${boat.name}? Its trips, sign-ons, photo and member list are removed for good, and its members are told by email. This cannot be undone.`}
+            yes="Delete the boat"
+            onYes={() => void deleteBoat()}
+            onNo={() => setDeleting(false)}
+            busy={deleteBusy}
+          />
+        )}
+        {boat.my_role === "owner" && !canDelete && <p className="hint">Other owners must leave the boat before it can be deleted.</p>}
+        {actionError && !member && (
+          <p className="error" role="alert">
+            {actionError}
+          </p>
+        )}
       </section>
       {editing && (
         <EditBoat
@@ -169,6 +209,10 @@ export function BoatPage() {
         />
       )}
 
+      {messaging && me && (
+        <MessageDialog boatId={boat.id} boatName={boat.name} others={(boat.members?.length ?? 1) - 1} myEmail={me.email} onClose={() => setMessaging(false)} />
+      )}
+
       {approved && member && me && (
         <div className="boat-layout">
           <Calendar boat={boat} me={me} />
@@ -185,6 +229,17 @@ export function BoatPage() {
                         {" "}
                         · {m.role === "owner" ? `owner, ${m.share_percent}%` : "crew"}
                       </span>
+                      {m.phone && m.user_id !== me.id && (
+                        <span className="contact">
+                          {m.phone}
+                          <a className="button secondary small" href={`tel:${m.phone.replace(/[^+\d]/g, "")}`}>
+                            Call
+                          </a>
+                          <a className="button secondary small" href={`sms:${m.phone.replace(/[^+\d]/g, "")}`}>
+                            Text
+                          </a>
+                        </span>
+                      )}
                     </span>
                     {m.user_id === me.id ? (
                       <span className="member-actions">
@@ -213,6 +268,11 @@ export function BoatPage() {
               <p className="error" role="alert">
                 {actionError}
               </p>
+            )}
+            {(boat.members?.length ?? 0) > 1 && (
+              <button type="button" className="button secondary" onClick={() => setMessaging(true)}>
+                Message the crew
+              </button>
             )}
             <p className="hint">Owners book the boat. Anyone aboard can sign on to a trip.</p>
             {boat.share_history && boat.share_history.length > 0 && (

@@ -12,7 +12,7 @@ def window(**extra):
 
 def test_register_login_me_logout(app, make_person):
     sam = make_person("sam@example.com", "Sam")
-    assert sam.get("/api/auth/me").json() == {"id": sam.id, "email": "sam@example.com", "name": "Sam", "is_admin": False, "email_trips": True}
+    assert sam.get("/api/auth/me").json() == {"id": sam.id, "email": "sam@example.com", "name": "Sam", "phone": "+1 310 555 0100", "is_admin": False, "email_trips": True}
     assert sam.post("/api/auth/logout").status_code == 200
     assert sam.get("/api/auth/me").status_code == 401
     reply = sam.post("/api/auth/login", json={"email": "SAM@example.com", "password": "correct horse battery"})
@@ -23,10 +23,10 @@ def test_bad_registrations_and_logins(app, make_person):
     make_person("sam@example.com", "Sam")
     from fastapi.testclient import TestClient
     anon = TestClient(app)
-    assert anon.post("/api/auth/register", json={"email": "sam@example.com", "name": "Again", "password": "correct horse battery"}).status_code == 409
-    assert anon.post("/api/auth/register", json={"email": "new@example.com", "name": "New", "password": "short"}).status_code == 422
-    assert anon.post("/api/auth/register", json={"email": "not-an-email", "name": "New", "password": "correct horse battery"}).status_code == 422
-    assert anon.post("/api/auth/register", json={"email": "new@example.com", "name": "   ", "password": "correct horse battery"}).status_code == 422
+    assert anon.post("/api/auth/register", json={"email": "sam@example.com", "name": "Again", "phone": "+1 310 555 0100", "password": "correct horse battery"}).status_code == 409
+    assert anon.post("/api/auth/register", json={"email": "new@example.com", "name": "New", "phone": "+1 310 555 0100", "password": "short"}).status_code == 422
+    assert anon.post("/api/auth/register", json={"email": "not-an-email", "name": "New", "phone": "+1 310 555 0100", "password": "correct horse battery"}).status_code == 422
+    assert anon.post("/api/auth/register", json={"email": "new@example.com", "name": "   ", "phone": "+1 310 555 0100", "password": "correct horse battery"}).status_code == 422
     assert anon.post("/api/auth/login", json={"email": "sam@example.com", "password": "wrong password!!"}).status_code == 401
     assert anon.post("/api/auth/login", json={"email": "nobody@example.com", "password": "wrong password!!"}).status_code == 401
 
@@ -238,10 +238,10 @@ def test_an_owner_edits_the_boat_and_everyone_sees_it(approved_boat, make_person
     assert (seen["name"], seen["home_port"], seen["description"], seen["timezone"], seen["status"]) == ("Scooter II", "Newport Beach", "Re-rigged", "America/Denver", "approved")
 
 
-def test_the_administrator_may_not_edit_a_boat_they_do_not_own(approved_boat, admin):
+def test_the_administrator_may_edit_any_boat(approved_boat, admin):
     boat_id, _ = approved_boat
-    assert admin.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 403
-    assert admin.get(f"/api/boats/{boat_id}").json()["name"] == "Scooter"
+    assert admin.patch(f"/api/boats/{boat_id}", json=EDIT).status_code == 200
+    assert admin.get(f"/api/boats/{boat_id}").json()["name"] == "Scooter II"
 
 
 def test_any_owner_may_edit_not_only_the_first(approved_boat, make_person, admin):
@@ -507,10 +507,12 @@ def test_what_is_stored_is_the_reencoded_small_jpeg(approved_boat):
     assert served.format == "JPEG" and served.size == (1200, 900)
 
 
-def test_only_an_owner_may_change_the_photo(approved_boat, make_person, admin):
+def test_only_an_owner_or_the_administrator_may_change_the_photo(approved_boat, make_person, admin):
     boat_id, skipper = approved_boat
     cass = join_as_crew(boat_id, skipper, make_person)
-    for who in (cass, admin, make_person("stranger@example.com", "Stranger")):
+    assert admin.put(f"/api/boats/{boat_id}/photo", content=picture()).status_code == 200
+    assert admin.delete(f"/api/boats/{boat_id}/photo").status_code == 200
+    for who in (cass, make_person("stranger@example.com", "Stranger")):
         assert who.put(f"/api/boats/{boat_id}/photo", content=picture()).status_code == 403
         assert who.delete(f"/api/boats/{boat_id}/photo").status_code == 403
     from fastapi.testclient import TestClient

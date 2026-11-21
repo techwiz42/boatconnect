@@ -9,6 +9,7 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
   const [params] = useSearchParams();
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -21,7 +22,7 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
     setBusy(true);
     setError("");
     try {
-      setMe(registering ? await api.register(email, name, password) : await api.login(email, password));
+      setMe(registering ? await api.register(email, name, phone, password) : await api.login(email, password));
       navigate(after, { replace: true });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "something went wrong");
@@ -37,6 +38,12 @@ export function AuthPage({ mode }: { mode: "login" | "register" }) {
           <label>
             Your name <span className="hint">(shown to the people on your boats)</span>
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} required autoComplete="name" />
+          </label>
+        )}
+        {registering && (
+          <label>
+            Telephone <span className="hint">(shown to the other members of your boats, so you can reach each other)</span>
+            <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={40} required autoComplete="tel" placeholder="+1 310 555 0123" />
           </label>
         )}
         <label>

@@ -194,6 +194,45 @@ h3 {
   margin: 0.5rem 0;
 }
 
+.notice {
+  background: #fff7e0;
+  border: 1px solid #ecd48a;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  margin: 0.5rem 0;
+}
+
+.contact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  width: 100%;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.button.small {
+  padding: 0.15rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.people {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.people li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.25rem 1rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
 /* ---- buttons and forms ---------------------------------------------------------------------------------------------------------------------------------- */
 
 .button {

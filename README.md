@@ -7,7 +7,13 @@ a month calendar like Google Calendar's.
 - **Joining**: anyone registered can ask. The administrator approves **owners** (who hold a share of the boat, which can be a fraction); a boat's owners approve its **crew**.
 - **Shares over time**: owners' shares may add up to at most 100%. An owner can lower their own share (or raise it into room nobody holds); that makes room for a new owner,
   who is then approved as usual. Every change is kept in the boat's share history, which its members can read.
-- **Editing**: only an owner can change a boat's name, port, description and time zone.
+- **Editing and deleting**: a boat's owners and the administrator can change its name, port, description, time zone and photo. The administrator can delete any boat; an owner can delete
+  theirs once no other owner is left on it. Deleting removes its members, trips and photo, and tells its members by email.
+- **Contacting each other**: in a boat's member list each person's number has **Call** and **Text** buttons (the phone's own dialer and messages app, so it uses the caller's own number).
+  **Message the crew** emails everyone else on the boat from boatconnect's address with the sender's address as Reply-To, so replies reach them and the address is shown only to those who reply.
+  Email addresses are never shown in the member list.
+- **People**: everyone gives a telephone number when they register (members of a boat see each other's). Anyone can change their own name, number and password, and delete their account
+  (refused while they are a boat's only owner). The administrator has a People page to edit or delete anyone.
 - **Leaving**: a member can leave; an owner can remove crew; an owner leaves only by their own choice (the administrator can also remove anyone). A boat keeps at least one owner.
 - **Trips**: an owner books the boat with a start and an end time. Crew and other owners **sign on** to a trip, and any number can be aboard. Two trips of one boat may not
   overlap. A trip may have a limit on how many can come.

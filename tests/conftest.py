@@ -50,7 +50,7 @@ class Person:
     def __init__(self, app, email, name):
         self.client = TestClient(app)
         self.email, self.name = email, name
-        reply = self.client.post("/api/auth/register", json={"email": email, "name": name, "password": "correct horse battery"})
+        reply = self.client.post("/api/auth/register", json={"email": email, "name": name, "phone": "+1 310 555 0100", "password": "correct horse battery"})
         assert reply.status_code == 201, reply.text
         self.id = reply.json()["id"]
 

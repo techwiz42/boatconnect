@@ -7,6 +7,7 @@ import { Account, Forgot, Reset, Unsubscribe } from "./Account";
 import { Inbox } from "./Inbox";
 import { Landing } from "./Landing";
 import { NewBoat } from "./NewBoat";
+import { People } from "./People";
 
 function Header() {
   const { me, setMe, inboxCount } = useAuth();
@@ -33,6 +34,7 @@ function Header() {
             Waiting for you{inboxCount > 0 && <span className="count">{inboxCount}</span>}
           </NavLink>
         )}
+        {me?.is_admin && <NavLink to="/people">People</NavLink>}
         {me === null && <NavLink to="/login">Log in</NavLink>}
         {me === null && <NavLink to="/register">Register</NavLink>}
         {me && (
@@ -75,6 +77,7 @@ export default function App() {
             <Route path="/boats/:id" element={<BoatPage />} />
             <Route path="/inbox" element={<Inbox />} />
             <Route path="/account" element={<Account />} />
+            <Route path="/people" element={<People />} />
             <Route path="/forgot" element={<Forgot />} />
             <Route path="/reset" element={<Reset />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />

@@ -193,7 +193,7 @@ def test_each_member_gets_their_own_unsubscribe_link(mailer, approved_boat, make
 def test_everything_still_works_with_no_mail_set_up(store, admin_emails=(ADMIN,)):
     app = create_app(store=store, admin_emails=admin_emails)                                          # no mailer: nothing is sent, nothing breaks
     sam = TestClient(app)
-    assert sam.post("/api/auth/register", json={"email": "sam@example.com", "name": "Sam", "password": "correct horse battery"}).status_code == 201
+    assert sam.post("/api/auth/register", json={"email": "sam@example.com", "name": "Sam", "phone": "+1 310 555 0100", "password": "correct horse battery"}).status_code == 201
     assert sam.post("/api/boats", json=BOAT).status_code == 201
     assert sam.post("/api/auth/forgot", json={"email": "sam@example.com"}).status_code == 503
 

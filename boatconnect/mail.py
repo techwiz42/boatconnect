@@ -24,6 +24,8 @@ class Mail:
     text: str
     html: str
     unsubscribe_url: Optional[str] = None            # for mail a person can opt out of: becomes the List-Unsubscribe header (one-click)
+    reply_to: Optional[str] = None                   # a person's own address, for mail they wrote: replies go to them instead of the site's reply address
+    from_person: bool = False                        # a message a member wrote, not an automatic notice: autoresponders may answer it
 
 
 def one_line(value: str, limit: int = 200) -> str:
@@ -37,12 +39,15 @@ def build_message(sender: str, reply_to: Optional[str], to: str, mail: Mail) -> 
     message = EmailMessage()
     message["From"] = sender
     message["To"] = one_line(to, 320)
-    if reply_to:
+    if mail.reply_to:
+        message["Reply-To"] = mail.reply_to
+    elif reply_to:
         message["Reply-To"] = reply_to
     message["Subject"] = one_line(mail.subject)
     message["Date"] = formatdate(localtime=False)
     message["Message-ID"] = make_msgid(domain=domain)
-    message["Auto-Submitted"] = "auto-generated"                                       # a notice, not a conversation: autoresponders leave it alone
+    if not mail.from_person:
+        message["Auto-Submitted"] = "auto-generated"                                   # a notice, not a conversation: autoresponders leave it alone
     if mail.unsubscribe_url:
         message["List-Unsubscribe"] = f"<{mail.unsubscribe_url}>"
         message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"

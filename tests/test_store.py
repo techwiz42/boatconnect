@@ -11,9 +11,10 @@ def downgrade(path, version):
     undo = {1: ["DROP TABLE share_history"],
             2: ["DROP TABLE calendar_feeds", "ALTER TABLE bookings DROP COLUMN updated_at"],
             3: ["DROP TABLE boat_photos"],
-            4: ["DROP TABLE password_resets", "ALTER TABLE users DROP COLUMN email_trips", "ALTER TABLE users DROP COLUMN mail_token"]}
+            4: ["DROP TABLE password_resets", "ALTER TABLE users DROP COLUMN email_trips", "ALTER TABLE users DROP COLUMN mail_token"],
+            5: ["ALTER TABLE users DROP COLUMN phone"]}
     with sqlite3.connect(path) as db:
-        for step in range(4, version - 1, -1):
+        for step in range(5, version - 1, -1):
             for statement in undo[step]:
                 db.execute(statement)
         db.execute(f"PRAGMA user_version = {version}")
@@ -37,7 +38,7 @@ def test_the_creator_is_the_first_owner_and_the_boat_waits(store):
     owner = user(store, 1)
     b = boat(store, owner, 40)
     assert store.get_boat(b)["status"] == "pending"
-    assert store.members(b) == [{"user_id": owner, "name": "User 1", "role": "owner", "share_percent": 40}]
+    assert store.members(b) == [{"user_id": owner, "name": "User 1", "phone": "", "role": "owner", "share_percent": 40}]
     assert store.approved_boats() == [] and [x["id"] for x in store.pending_boats()] == [b]
 
 
