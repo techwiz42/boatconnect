@@ -2,6 +2,7 @@ import { FormEvent, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api";
 import { useAuth } from "./auth";
+import { Confirm } from "./Confirm";
 
 const sayError = (err: unknown) => (err instanceof ApiError ? err.message : "something went wrong");
 
@@ -26,28 +27,175 @@ export function Account() {
   }
 
   return (
-    <section className="card narrow">
-      <h1>Your account</h1>
-      <p>
-        <strong>{me.name}</strong>
-        <br />
-        <span className="hint">{me.email}</span>
-      </p>
-      <h2>Email</h2>
-      <label className="setting">
-        <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} />
-        <span>
-          Email me when a trip on one of my boats is booked, changed or cancelled
-          <br />
-          <span className="hint">Notices about requests to join your boats, and decisions on your own requests, are always sent.</span>
-        </span>
+    <>
+      <section className="card narrow">
+        <h1>Your account</h1>
+        <Profile />
+        <h2>Email</h2>
+        <label className="setting">
+          <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} />
+          <span>
+            Email me when a trip on one of my boats is booked, changed or cancelled
+            <br />
+            <span className="hint">Notices about requests to join your boats, and decisions on your own requests, are always sent.</span>
+          </span>
+        </label>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+      </section>
+      <section className="card narrow">
+        <Password />
+      </section>
+      <section className="card narrow">
+        <DeleteAccount />
+      </section>
+    </>
+  );
+}
+
+/** Name and telephone: the name and number the other members of your boats see. Someone registered before numbers were kept is asked for theirs here. */
+function Profile() {
+  const { me, setMe } = useAuth();
+  const [name, setName] = useState(me?.name ?? "");
+  const [phone, setPhone] = useState(me?.phone ?? "");
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  if (!me) return null;
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setSaved(false);
+    try {
+      setMe(await api.setProfile(name, phone));
+      setSaved(true);
+    } catch (err) {
+      setError(sayError(err));
+    }
+    setBusy(false);
+  }
+
+  return (
+    <form onSubmit={save} className="form">
+      {!me.phone && <p className="notice">Please add your telephone number: the other members of your boats see it, so you can reach each other.</p>}
+      <label>
+        Your name
+        <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} required autoComplete="name" />
+      </label>
+      <label>
+        Telephone
+        <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={40} required autoComplete="tel" placeholder="+1 310 555 0123" />
+      </label>
+      <p className="hint">{me.email}</p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {saved && <p className="hint" role="status">Saved.</p>}
+      <button className="button" disabled={busy}>
+        Save
+      </button>
+    </form>
+  );
+}
+
+function Password() {
+  const [current, setCurrent] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function change(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setDone(false);
+    try {
+      await api.changePassword(current, password);
+      setCurrent("");
+      setPassword("");
+      setDone(true);
+    } catch (err) {
+      setError(sayError(err));
+    }
+    setBusy(false);
+  }
+
+  return (
+    <form onSubmit={change} className="form">
+      <h2>Change your password</h2>
+      <label>
+        Current password
+        <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} required autoComplete="current-password" />
+      </label>
+      <label>
+        New password <span className="hint">(at least 10 characters; you stay signed in here, other devices are signed out)</span>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={10} autoComplete="new-password" />
       </label>
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-    </section>
+      {done && <p className="hint" role="status">Your password is changed.</p>}
+      <button className="button" disabled={busy}>
+        Change password
+      </button>
+    </form>
+  );
+}
+
+/** Deleting your own account, with your password. Refused by the server while you are the only owner of a boat. */
+function DeleteAccount() {
+  const { setMe } = useAuth();
+  const [asking, setAsking] = useState(false);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function remove() {
+    setBusy(true);
+    setError("");
+    try {
+      await api.deleteAccount(password);
+      setMe(null);
+      window.location.assign("/");
+    } catch (err) {
+      setError(sayError(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="form">
+      <h2>Delete your account</h2>
+      <p className="hint">Removes you from your boats, with the trips you booked and your sign-ons. If you are the only owner of a boat, delete the boat first or make someone else an owner.</p>
+      {!asking ? (
+        <button type="button" className="button danger" onClick={() => setAsking(true)}>
+          Delete my account
+        </button>
+      ) : (
+        <>
+          <label>
+            Your password, to confirm
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+          </label>
+          <Confirm text="Delete your account for good? This cannot be undone." yes="Delete my account" onYes={() => void remove()} onNo={() => setAsking(false)} busy={busy || !password} />
+        </>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 

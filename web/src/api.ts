@@ -4,6 +4,7 @@ export interface Me {
   id: string;
   email: string;
   name: string;
+  phone: string; // empty for someone registered before telephone numbers were kept: Your account asks them for it
   is_admin: boolean;
   email_trips: boolean; // whether they want an email when a trip on one of their boats is booked, changed or cancelled
 }
@@ -13,6 +14,7 @@ export type Role = "owner" | "crew";
 export interface Member {
   user_id: string;
   name: string;
+  phone: string;
   role: Role;
   share_percent: number | null;
 }
@@ -104,6 +106,16 @@ export interface Inbox {
   requests: JoinRequest[];
 }
 
+export interface Person {
+  id: string;
+  email: string;
+  name: string;
+  phone: string;
+  created_at: number;
+  last_login_at: number | null;
+  boats: number; // how many boats they belong to
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -151,13 +163,21 @@ async function call<T>(method: string, path: string, body?: unknown, raw?: Blob)
 
 export const api = {
   me: () => call<Me>("GET", "/api/auth/me"),
-  register: (email: string, name: string, password: string) => call<Me>("POST", "/api/auth/register", { email, name, password }),
+  register: (email: string, name: string, phone: string, password: string) => call<Me>("POST", "/api/auth/register", { email, name, phone, password }),
   login: (email: string, password: string) => call<Me>("POST", "/api/auth/login", { email, password }),
   logout: () => call<{ ok: boolean }>("POST", "/api/auth/logout"),
   forgot: (email: string) => call<{ ok: boolean }>("POST", "/api/auth/forgot", { email }),
   reset: (token: string, password: string) => call<{ ok: boolean }>("POST", "/api/auth/reset", { token, password }),
   unsubscribe: (token: string) => call<{ ok: boolean }>("POST", `/api/unsubscribe/${encodeURIComponent(token)}`),
   setPreferences: (emailTrips: boolean) => call<Me>("PATCH", "/api/auth/preferences", { email_trips: emailTrips }),
+  setProfile: (name: string, phone: string) => call<Me>("PATCH", "/api/auth/profile", { name, phone }),
+  changePassword: (current: string, password: string) => call<{ ok: boolean }>("POST", "/api/auth/password", { current, password }),
+  deleteAccount: (password: string) => call<{ ok: boolean }>("POST", "/api/auth/delete-account", { password }),
+  people: () => call<Person[]>("GET", "/api/admin/users"),
+  editPerson: (id: string, p: { name: string; email: string; phone: string }) => call<{ ok: boolean }>("PATCH", `/api/admin/users/${id}`, p),
+  deletePerson: (id: string) => call<{ ok: boolean }>("DELETE", `/api/admin/users/${id}`),
+  messageCrew: (boatId: string, subject: string, body: string) => call<{ sent: number }>("POST", `/api/boats/${boatId}/messages`, { subject, body }),
+  deleteBoat: (boatId: string) => call<{ ok: boolean }>("DELETE", `/api/boats/${boatId}`),
   boats: () => call<Boat[]>("GET", "/api/boats"),
   boat: (id: string) => call<Boat>("GET", `/api/boats/${id}`),
   addBoat: (b: { name: string; home_port: string; description: string; timezone: string; share_percent: number }) => call<{ id: string }>("POST", "/api/boats", b),

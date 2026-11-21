@@ -15,7 +15,7 @@ PW = "correct horse battery"
 
 def person(email, name):
     c = httpx.Client(base_url=BASE)
-    r = c.post("/api/auth/register", json={"email": email, "name": name, "password": PW})
+    r = c.post("/api/auth/register", json={"email": email, "name": name, "phone": "+1 310 555 0100", "password": PW})
     assert r.status_code == 201, r.text
     return c
 

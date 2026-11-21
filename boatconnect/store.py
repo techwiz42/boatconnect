@@ -16,7 +16,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 NAME_CHARS = 60
 BOAT_NAME_CHARS = 80
@@ -27,7 +27,7 @@ MAX_BOOKING_SECONDS = 30 * 24 * 3600
 SCHEMA = """
 CREATE TABLE users (
   id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at REAL NOT NULL,
-  login_count INTEGER NOT NULL DEFAULT 0, last_login_at REAL, email_trips INTEGER NOT NULL DEFAULT 1, mail_token TEXT);
+  login_count INTEGER NOT NULL DEFAULT 0, last_login_at REAL, email_trips INTEGER NOT NULL DEFAULT 1, mail_token TEXT, phone TEXT NOT NULL DEFAULT '');
 CREATE TABLE auth_sessions (
   token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL, expires_at REAL NOT NULL);
 CREATE TABLE boats (
@@ -96,6 +96,11 @@ CREATE TABLE password_resets (
   token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at REAL NOT NULL, expires_at REAL NOT NULL, used_at REAL);
 """
 
+# Version 6 keeps a telephone number for each person (those registered before it start without one and are asked for it in Your account).
+MIGRATE_5_TO_6 = """
+ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT '';
+"""
+
 
 class StoreError(Exception):
     """A request the store refuses (a duplicate email, an overlapping booking). The message is safe to show the user."""
@@ -114,14 +119,16 @@ class Store:
             if version == 0:
                 db.executescript(SCHEMA)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version in (1, 2, 3, 4):
+            elif version in (1, 2, 3, 4, 5):
                 if version == 1:
                     db.executescript(MIGRATE_1_TO_2)
                 if version in (1, 2):
                     db.executescript(MIGRATE_2_TO_3)
                 if version in (1, 2, 3):
                     db.executescript(MIGRATE_3_TO_4)
-                db.executescript(MIGRATE_4_TO_5)
+                if version in (1, 2, 3, 4):
+                    db.executescript(MIGRATE_4_TO_5)
+                db.executescript(MIGRATE_5_TO_6)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StoreError(f"the database has schema version {version}; this program expects {SCHEMA_VERSION}")
@@ -142,19 +149,19 @@ class Store:
 
     # ---- users and login sessions -----------------------------------------------------------------------------------------------------------------------------
 
-    def create_user(self, email: str, name: str, password_hash: str) -> str:
+    def create_user(self, email: str, name: str, password_hash: str, phone: str = "") -> str:
         user_id = uuid.uuid4().hex
         try:
             with self._connect() as db:
-                db.execute("INSERT INTO users (id, email, name, password_hash, created_at, mail_token) VALUES (?, ?, ?, ?, ?, ?)",
-                           (user_id, email, name, password_hash, time.time(), secrets.token_urlsafe(24)))
+                db.execute("INSERT INTO users (id, email, name, password_hash, created_at, mail_token, phone) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (user_id, email, name, password_hash, time.time(), secrets.token_urlsafe(24), phone))
         except sqlite3.IntegrityError:
             raise StoreError("that email is already registered")
         return user_id
 
     def user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
-            row = db.execute("SELECT id, email, name, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+            row = db.execute("SELECT id, email, name, phone, password_hash FROM users WHERE email = ?", (email,)).fetchone()
         return dict(row) if row else None
 
     def count_users(self) -> int:
@@ -174,7 +181,7 @@ class Store:
 
     def user_for_login(self, token_hash: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
-            row = db.execute("SELECT u.id, u.email, u.name, u.email_trips FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+            row = db.execute("SELECT u.id, u.email, u.name, u.phone, u.email_trips FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
                              (token_hash, time.time())).fetchone()
         return dict(row) if row else None
 
@@ -184,14 +191,67 @@ class Store:
 
     def user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as db:
-            row = db.execute("SELECT id, email, name, email_trips, mail_token FROM users WHERE id = ?", (user_id,)).fetchone()
+            row = db.execute("SELECT id, email, name, phone, email_trips, mail_token FROM users WHERE id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+    def update_profile(self, user_id: str, name: str, phone: str) -> None:
+        with self._connect() as db:
+            if not db.execute("UPDATE users SET name = ?, phone = ? WHERE id = ?", (name, phone, user_id)).rowcount:
+                raise StoreError("no such user")
+
+    def change_password(self, user_id: str, new_password_hash: str, keep_token_hash: str) -> None:
+        """Set a new password and end every login of that person but the one making the change (whoever had the old password is out); their reset links are cancelled."""
+        with self._connect() as db:
+            db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_password_hash, user_id))
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ? AND token_hash != ?", (user_id, keep_token_hash))
+            db.execute("DELETE FROM password_resets WHERE user_id = ?", (user_id,))
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT u.id, u.email, u.name, u.phone, u.created_at, u.last_login_at, (SELECT COUNT(*) FROM memberships m WHERE m.user_id = u.id) AS boats "
+                              "FROM users u ORDER BY u.name COLLATE NOCASE, u.email").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_user(self, user_id: str, name: str, email: str, phone: str) -> None:
+        """The administrator changes someone's name, email or phone. Changing the email ends that person's logins."""
+        try:
+            with self._connect() as db:
+                old = db.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+                if not old:
+                    raise StoreError("no such user")
+                db.execute("UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?", (name, email, phone, user_id))
+                if old["email"] != email:
+                    db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+                    db.execute("DELETE FROM password_resets WHERE user_id = ?", (user_id,))
+        except sqlite3.IntegrityError:
+            raise StoreError("that email is already registered")
+
+    def delete_user(self, user_id: str) -> None:
+        """Remove an account with its logins, memberships, requests, trips and sign-ons. A person who is the only owner of a boat cannot be removed: the boat would have no owner.
+        Boats they added but others own go on, credited to another owner."""
+        with self._connect() as db:
+            if not db.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+                raise StoreError("no such user")
+            alone = db.execute("SELECT b.name FROM memberships m JOIN boats b ON b.id = m.boat_id WHERE m.user_id = ? AND m.role = 'owner' "
+                               "AND (SELECT COUNT(*) FROM memberships o WHERE o.boat_id = m.boat_id AND o.role = 'owner') = 1 ORDER BY b.name COLLATE NOCASE", (user_id,)).fetchall()
+            if alone:
+                names = ", ".join(f'"{r["name"]}"' for r in alone)
+                raise StoreError(f"this person is the only owner of {names}; delete the boat first, or make someone else an owner")
+            db.execute("UPDATE boats SET created_by = (SELECT o.user_id FROM memberships o WHERE o.boat_id = boats.id AND o.role = 'owner' AND o.user_id != ? ORDER BY o.created_at LIMIT 1) "
+                       "WHERE created_by = ?", (user_id, user_id))
+            db.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     # ---- mail: who is told what -------------------------------------------------------------------------------------------------------------------------------
 
     def boat_owners(self, boat_id: str) -> List[Dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT u.id, u.email, u.name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? AND m.role = 'owner' ORDER BY u.name", (boat_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def boat_members_to_tell(self, boat_id: str, exclude_user_id: str) -> List[Dict[str, Any]]:
+        """Everyone on a boat but one person (who is told what happened to it)."""
+        with self._connect() as db:
+            rows = db.execute("SELECT u.id, u.email, u.name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? AND u.id != ? ORDER BY u.name", (boat_id, exclude_user_id)).fetchall()
         return [dict(r) for r in rows]
 
     def trip_recipients(self, boat_id: str, exclude_user_id: str) -> List[Dict[str, Any]]:
@@ -253,6 +313,12 @@ class Store:
             changed = db.execute("UPDATE boats SET name = ?, home_port = ?, description = ?, timezone = ? WHERE id = ?", (name, home_port, description, timezone, boat_id)).rowcount
         if not changed:
             raise StoreError("no such boat")
+
+    def delete_boat(self, boat_id: str) -> None:
+        """Remove a boat with its members, requests, trips, sign-ons, share history and photo."""
+        with self._connect() as db:
+            if not db.execute("DELETE FROM boats WHERE id = ?", (boat_id,)).rowcount:
+                raise StoreError("no such boat")
 
     def set_photo(self, boat_id: str, data: bytes) -> None:
         """Keep a boat's photo (already checked and re-encoded by photos.process_photo); a new one replaces the old."""
@@ -333,7 +399,7 @@ class Store:
 
     def members(self, boat_id: str) -> List[Dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("SELECT m.user_id, u.name, m.role, m.share_percent FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? "
+            rows = db.execute("SELECT m.user_id, u.name, u.phone, m.role, m.share_percent FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.boat_id = ? "
                               "ORDER BY m.role DESC, m.share_percent DESC, u.name COLLATE NOCASE", (boat_id,)).fetchall()
         return [dict(r) for r in rows]
 

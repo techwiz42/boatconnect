@@ -3,6 +3,7 @@ kept on one line in subjects. Every link points at PUBLIC_URL, never at anything
 from __future__ import annotations
 
 from datetime import datetime
+from email.utils import formataddr
 from html import escape
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -71,6 +72,23 @@ def boat_decision(boat: str, approved: bool, base: str, boat_id: str) -> Mail:
     verdict = f'Your boat "{boat}" was approved and now appears in the list.' if approved else f'Your boat "{boat}" was not approved.'
     return Mail(one_line(f"Your boat {boat} was {'approved' if approved else 'not approved'}"), _text([verdict], url if approved else None, FOOTER),
                 _page("Your boat", [escape(verdict)], ("Open the boat", url) if approved else None, escape(FOOTER)))
+
+
+def boat_deleted(boat: str, by: str, base: str) -> Mail:
+    return Mail(one_line(f"{boat} was deleted"),
+                _text([f'{by} deleted the boat "{boat}". Its trips and member list are gone.'], base, FOOTER),
+                _page("A boat was deleted", [f"<strong>{escape(by)}</strong> deleted the boat <strong>{escape(boat)}</strong>. Its trips and member list are gone."], ("See the boats", base), escape(FOOTER)))
+
+
+def crew_message(sender: str, sender_email: str, boat: str, subject: str, text: str, base: str, boat_id: str) -> Mail:
+    """A message one member wrote to the others on a boat. It is sent from boatconnect's address; replying answers the sender, whose address is only in Reply-To."""
+    url = f"{base}/boats/{boat_id}"
+    footer = f"{sender} sent this to everyone on {boat} through boatconnect. Replying answers {sender} directly."
+    heading = one_line(subject) or f"A message from {sender}"
+    body = escape(text).replace("\n", "<br>")
+    return Mail(one_line(f"[{boat}] {subject or 'Message from ' + sender}"), _text([f"From {sender}, to everyone on {boat}:", "", text], url, footer),
+                _page(heading, [f"<strong>{escape(sender)}</strong> wrote to everyone on <strong>{escape(boat)}</strong>:", body], ("Open the boat", url), escape(footer)),
+                reply_to=formataddr((one_line(sender, 60), sender_email)), from_person=True)
 
 
 def trip_notice(kind: str, actor: str, boat: str, title: str, span: str, base: str, boat_id: str, unsubscribe: str, page: str) -> Mail:

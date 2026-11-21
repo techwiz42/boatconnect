@@ -68,16 +68,52 @@ class Credentials(BaseModel):
     password: str = Field(max_length=500)
 
 
+def _clean_name(value: str) -> str:
+    value = " ".join(value.split())
+    if not value:
+        raise ValueError("enter your name")
+    return value
+
+
+PHONE_CHARS = set("0123456789 +-().")
+
+
+def _clean_phone(value: str) -> str:
+    """A telephone number as people write it: digits with spaces, dots, dashes, parentheses and a leading +; seven to fifteen digits."""
+    value = " ".join(value.split())
+    digits = sum(c.isdigit() for c in value)
+    if not set(value) <= PHONE_CHARS or "+" in value[1:] or not 7 <= digits <= 15:
+        raise ValueError("enter a telephone number, for example +1 310 555 0123")
+    return value
+
+
 class Registration(Credentials):
     name: str = Field(min_length=1, max_length=NAME_CHARS)
+    phone: str = Field(max_length=40)
 
-    @field_validator("name")
-    @classmethod
-    def _name(cls, value: str) -> str:
-        value = " ".join(value.split())
-        if not value:
-            raise ValueError("enter your name")
-        return value
+    _name = field_validator("name")(lambda cls, v: _clean_name(v))
+    _phone = field_validator("phone")(lambda cls, v: _clean_phone(v))
+
+
+class ProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=NAME_CHARS)
+    phone: str = Field(max_length=40)
+
+    _name = field_validator("name")(lambda cls, v: _clean_name(v))
+    _phone = field_validator("phone")(lambda cls, v: _clean_phone(v))
+
+
+class UserEdit(ProfileIn):
+    email: str = Field(max_length=320)
+
+
+class PasswordChange(BaseModel):
+    current: str = Field(max_length=500)
+    password: str = Field(max_length=500)
+
+
+class PasswordOnly(BaseModel):
+    password: str = Field(max_length=500)
 
 
 def _zone(value: str) -> str:
@@ -120,6 +156,24 @@ class ForgotIn(BaseModel):
 class ResetIn(BaseModel):
     token: str = Field(max_length=200)
     password: str = Field(max_length=500)
+
+
+class MessageIn(BaseModel):
+    subject: str = Field(default="", max_length=100)
+    body: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("subject")
+    @classmethod
+    def _subject(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @field_validator("body")
+    @classmethod
+    def _body(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("write a message")
+        return value
 
 
 class PreferencesIn(BaseModel):
@@ -165,6 +219,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     forgot_by_address = auth.Throttle(limit=8, window_seconds=3600)         # password-reset requests, per address
     forgot_by_email = auth.Throttle(limit=3, window_seconds=3600)           # ... and per account, so one person cannot be flooded with reset mail
     reset_misses = auth.Throttle(limit=10, window_seconds=15 * 60)          # wrong or used reset links, per address
+    messages_sent = auth.Throttle(limit=20, window_seconds=24 * 3600)       # messages to a boat's crew, per user
     unsubscribe_misses = auth.Throttle(limit=30, window_seconds=15 * 60)    # wrong unsubscribe links, per address
 
     @asynccontextmanager
@@ -237,7 +292,7 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         response.set_cookie(COOKIE, token, max_age=int(auth.LOGIN_LIFETIME_SECONDS), httponly=True, samesite="strict", secure=app.state.cookie_secure, path="/")
 
     def person(user: Dict[str, Any]) -> Dict[str, Any]:
-        return {"id": user["id"], "email": user["email"], "name": user["name"], "is_admin": is_admin(user), "email_trips": bool(user.get("email_trips", 1))}
+        return {"id": user["id"], "email": user["email"], "name": user["name"], "phone": user.get("phone", ""), "is_admin": is_admin(user), "email_trips": bool(user.get("email_trips", 1))}
 
     def queue(background: BackgroundTasks, addresses: Any, mail: Mail) -> None:
         """Send after the response has gone, so a slow mail server never holds a request up; nothing happens when no relay is configured."""
@@ -256,12 +311,12 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         except auth.AuthError as error:
             raise HTTPException(status_code=422, detail=str(error))
         password_hash = await asyncio.to_thread(auth.hash_password, body.password)
-        user_id = await db(app.state.store.create_user, email, body.name, password_hash)
+        user_id = await db(app.state.store.create_user, email, body.name, password_hash, body.phone)
         registrations.add(where)
         token, hashed = auth.new_token()
         await app.state.store.run(app.state.store.create_login, user_id, hashed, auth.LOGIN_LIFETIME_SECONDS)
         start_login(response, token)
-        return person({"id": user_id, "email": email, "name": body.name})
+        return person({"id": user_id, "email": email, "name": body.name, "phone": body.phone})
 
     @app.post("/api/auth/login", dependencies=[Depends(same_origin)])
     async def login(body: Credentials, request: Request, response: Response) -> Dict[str, Any]:
@@ -301,6 +356,72 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
     async def preferences(body: PreferencesIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
         await app.state.store.run(app.state.store.set_email_trips, user["id"], body.email_trips)
         return {**person(user), "email_trips": body.email_trips}
+
+    @app.patch("/api/auth/profile", dependencies=[Depends(same_origin)])
+    async def profile(body: ProfileIn, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+        await db(app.state.store.update_profile, user["id"], body.name, body.phone)
+        return person({**user, "name": body.name, "phone": body.phone})
+
+    async def confirm_password(user: Dict[str, Any], password: str, request: Request) -> None:
+        """Changing the password or deleting the account asks for the current password, with the same limit on wrong guesses as logging in."""
+        where = address(request)
+        for throttle, key in ((login_failures, user["email"]), (address_failures, where)):
+            if throttle.blocked(key):
+                raise HTTPException(status_code=429, detail="too many failed attempts; try again later", headers={"Retry-After": str(throttle.retry_after(key))})
+        row = await app.state.store.run(app.state.store.user_by_email, user["email"])
+        if not (row and await asyncio.to_thread(auth.verify_password, password, row["password_hash"])):
+            login_failures.add(user["email"])
+            address_failures.add(where)
+            raise HTTPException(status_code=403, detail="that is not your current password")
+        login_failures.clear(user["email"])
+
+    @app.post("/api/auth/password", dependencies=[Depends(same_origin)])
+    async def change_password(body: PasswordChange, request: Request, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        await confirm_password(user, body.current, request)
+        try:
+            auth.check_password(body.password)
+        except auth.AuthError as error:
+            raise HTTPException(status_code=422, detail=str(error))
+        new_hash = await asyncio.to_thread(auth.hash_password, body.password)
+        await app.state.store.run(app.state.store.change_password, user["id"], new_hash, auth.hash_token(request.cookies.get(COOKIE, "")))
+        return {"ok": True}
+
+    @app.post("/api/auth/delete-account", dependencies=[Depends(same_origin)])
+    async def delete_account(body: PasswordOnly, request: Request, response: Response, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        """A person deletes their own account (with their password). Refused while they are the only owner of a boat."""
+        await confirm_password(user, body.password, request)
+        await db(app.state.store.delete_user, user["id"])
+        response.delete_cookie(COOKIE, path="/")
+        return {"ok": True}
+
+    # ---- the administrator's list of people ---------------------------------------------------------------------------------------------------------------------
+
+    async def administrator(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
+        if not is_admin(user):
+            raise HTTPException(status_code=403, detail="only the administrator may do this")
+        return user
+
+    @app.get("/api/admin/users")
+    async def admin_users(user: Dict[str, Any] = Depends(administrator)) -> List[Dict[str, Any]]:
+        return await app.state.store.run(app.state.store.list_users)
+
+    @app.patch("/api/admin/users/{user_id}", dependencies=[Depends(same_origin)])
+    async def admin_edit_user(user_id: str, body: UserEdit, admin: Dict[str, Any] = Depends(administrator)) -> Dict[str, bool]:
+        try:
+            email = auth.normalize_email(body.email)
+        except auth.AuthError as error:
+            raise HTTPException(status_code=422, detail=str(error))
+        if user_id == admin["id"] and email != admin["email"]:
+            raise HTTPException(status_code=403, detail="change your own email address in Your account, not here: it is what makes you the administrator")
+        await db(app.state.store.update_user, user_id, body.name, email, body.phone)
+        return {"ok": True}
+
+    @app.delete("/api/admin/users/{user_id}", dependencies=[Depends(same_origin)])
+    async def admin_delete_user(user_id: str, admin: Dict[str, Any] = Depends(administrator)) -> Dict[str, bool]:
+        if user_id == admin["id"]:
+            raise HTTPException(status_code=403, detail="delete your own account in Your account, not here")
+        await db(app.state.store.delete_user, user_id)
+        return {"ok": True}
 
     @app.post("/api/unsubscribe/{token}")
     async def unsubscribe(token: str, request: Request) -> Dict[str, bool]:
@@ -406,11 +527,38 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
 
     @app.patch("/api/boats/{boat_id}", dependencies=[Depends(same_origin)])
     async def edit_boat(boat_id: str, body: BoatEdit, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
-        """Only an owner changes the boat's details (even before it is approved). Crew, strangers and the administrator may not."""
-        await visible_boat(boat_id, user)
-        if await app.state.store.run(app.state.store.role_of, boat_id, user["id"]) != "owner":
-            raise HTTPException(status_code=403, detail="only an owner may change the boat's details")
+        """An owner or the administrator changes the boat's details (even before it is approved). Crew and strangers may not."""
+        await owner_of(boat_id, user, "change the boat's details")
         await db(app.state.store.update_boat, boat_id, body.name, body.home_port, body.description, body.timezone)
+        return {"ok": True}
+
+    @app.post("/api/boats/{boat_id}/messages", dependencies=[Depends(same_origin)])
+    async def message_the_crew(boat_id: str, body: MessageIn, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, int]:
+        """A member emails everyone else on the boat (owners and crew alike; their trip-email opt-out is for notices, not for what a shipmate writes). It is sent from boatconnect's
+        address with the sender's own address as Reply-To, so replies reach them, and their address goes only to people who reply."""
+        boat = await visible_boat(boat_id, user)
+        if not await app.state.store.run(app.state.store.role_of, boat_id, user["id"]):
+            raise HTTPException(status_code=403, detail="only the people on a boat may message them")
+        if not app.state.mailer.enabled:
+            raise HTTPException(status_code=503, detail="email is not set up on this site, so messages cannot be sent")
+        limit(messages_sent, user["id"], "messages")
+        others = await app.state.store.run(app.state.store.boat_members_to_tell, boat_id, user["id"])
+        if not others:
+            raise HTTPException(status_code=409, detail="no one else is on this boat yet")
+        queue(background, [m["email"] for m in others], emails.crew_message(user["name"], user["email"], boat["name"], body.subject, body.body, app.state.public_url, boat_id))
+        messages_sent.add(user["id"])
+        return {"sent": len(others)}
+
+    @app.delete("/api/boats/{boat_id}", dependencies=[Depends(same_origin)])
+    async def delete_boat(boat_id: str, background: BackgroundTasks, user: Dict[str, Any] = Depends(current_user)) -> Dict[str, bool]:
+        """The administrator may delete any boat. An owner may delete theirs once no other owner is left on it (co-owners leave first, or the administrator does it): a boat
+        with several owners is not one person's to wipe. Everything on it goes: members, trips, sign-ons, photo. Its members are told by email."""
+        boat = await owner_of(boat_id, user, "delete the boat")
+        if not is_admin(user) and boat["owner_count"] > 1:
+            raise HTTPException(status_code=403, detail="a boat with other owners cannot be deleted by one of them; the other owners leave it first, or ask the administrator")
+        members = await app.state.store.run(app.state.store.boat_members_to_tell, boat_id, user["id"])
+        await db(app.state.store.delete_boat, boat_id)
+        queue(background, [m["email"] for m in members], emails.boat_deleted(boat["name"], user["name"], app.state.public_url))
         return {"ok": True}
 
     @app.patch("/api/boats/{boat_id}/my-share", dependencies=[Depends(same_origin)])
@@ -420,10 +568,11 @@ def create_app(store: Optional[Store] = None, cookie_secure: bool = False, admin
         await db(app.state.store.set_share, boat_id, user["id"], body.share_percent)
         return {"ok": True}
 
-    async def owner_of(boat_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    async def owner_of(boat_id: str, user: Dict[str, Any], what: str = "change the boat's photo") -> Dict[str, Any]:
+        """The boat, if the user may change it: an owner of it, or the administrator."""
         boat = await visible_boat(boat_id, user)
-        if await app.state.store.run(app.state.store.role_of, boat_id, user["id"]) != "owner":
-            raise HTTPException(status_code=403, detail="only an owner may change the boat's photo")
+        if not is_admin(user) and await app.state.store.run(app.state.store.role_of, boat_id, user["id"]) != "owner":
+            raise HTTPException(status_code=403, detail=f"only an owner or the administrator may {what}")
         return boat
 
     @app.put("/api/boats/{boat_id}/photo", dependencies=[Depends(same_origin)])
