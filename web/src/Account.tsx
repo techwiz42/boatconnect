@@ -3,6 +3,7 @@ import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api";
 import { useAuth } from "./auth";
 import { Confirm } from "./Confirm";
+import { InstallApp } from "./InstallApp";
 
 const sayError = (err: unknown) => (err instanceof ApiError ? err.message : "something went wrong");
 
@@ -46,6 +47,7 @@ export function Account() {
           </p>
         )}
       </section>
+      <InstallApp />
       <section className="card narrow">
         <Password />
       </section>
