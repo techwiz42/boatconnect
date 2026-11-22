@@ -79,6 +79,9 @@ h3 {
   justify-content: space-between;
   gap: 0.5rem 1.5rem;
   padding: 0.6rem 1.25rem;
+  padding-top: calc(0.6rem + env(safe-area-inset-top)); /* in the installed app on a phone with a notch, below the status bar */
+  padding-left: max(1.25rem, env(safe-area-inset-left));
+  padding-right: max(1.25rem, env(safe-area-inset-right));
 }
 
 .brand {
@@ -151,6 +154,7 @@ h3 {
   color: var(--muted);
   font-size: 0.85rem;
   padding: 0.75rem;
+  padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
   background: var(--surface);
 }
 
